@@ -22,6 +22,8 @@ import org.wikidata.wdtk.datamodel.interfaces.ItemIdValue;
 import org.wikidata.wdtk.datamodel.interfaces.MonolingualTextValue;
 import org.wikidata.wdtk.datamodel.interfaces.PropertyDocument;
 import org.wikidata.wdtk.datamodel.interfaces.PropertyIdValue;
+import org.wikidata.wdtk.datamodel.interfaces.Snak;
+import org.wikidata.wdtk.datamodel.interfaces.SnakGroup;
 import org.wikidata.wdtk.datamodel.interfaces.StatementGroup;
 import org.wikidata.wdtk.datamodel.interfaces.Value;
 import org.wikidata.wdtk.datamodel.interfaces.ValueSnak;
@@ -41,9 +43,13 @@ import org.dswarm.graph.json.stream.ModelParser;
  */
 public class WikidataDswarmImporter {
 
-	private static final Logger LOG              = LoggerFactory.getLogger(WikidataDswarmImporter.class);
+	private static final Logger LOG = LoggerFactory.getLogger(WikidataDswarmImporter.class);
 
-	public static final  String LANGUAGE_CODE_EN = "en";
+	public static final String LANGUAGE_CODE_EN                          = "en";
+	public static final String CONFIDENCE_QUALIFIED_ATTRIBUTE_IDENTIFIER = "confidence";
+	public static final String EVIDENCE_QUALIFIED_ATTRIBUTE_IDENTIFIER   = "evidence";
+	public static final String ORDER_QUALIFIED_ATTRIBUTE_IDENTIFIER      = "order";
+	public static final String STATEMENT_UUID_QUALIFIED_ATTRIBUTE_IDENTIFIER = "statement uuid";
 
 	private final AtomicLong resourceCount = new AtomicLong();
 
@@ -133,9 +139,23 @@ public class WikidataDswarmImporter {
 		// create property value pair
 		final ValueSnak snak = Datamodel.makeValueSnak(wikidataProperty, wikidataValue);
 
-		// TODO: process qualified attributes at GDM statement
+		// process qualified attributes at GDM statement
+		final Optional<List<Snak>> wikidataQualifiers = processGDMQualifiedAttributes(statement);
 
-		final Claim claim = Datamodel.makeClaim(null, snak, null);
+		final List<SnakGroup> snakGroups;
+
+		if(wikidataQualifiers.isPresent()) {
+
+			final SnakGroup snakGroup = Datamodel.makeSnakGroup(wikidataQualifiers.get());
+
+			snakGroups = new ArrayList<>();
+			snakGroups.add(snakGroup);
+		} else {
+
+			snakGroups = null;
+		}
+
+		final Claim claim = Datamodel.makeClaim(null, snak, snakGroups);
 
 		// note: empty string for statement id (this should be utilised for statements that are created)
 		return Optional.ofNullable(Datamodel.makeStatement(claim, null, null, ""));
@@ -145,9 +165,14 @@ public class WikidataDswarmImporter {
 
 		final String predicateURI = predicate.getUri();
 
-		return gdmPropertyURIWikidataPropertyMap.computeIfAbsent(predicateURI, predicateURI1 -> {
+		return createOrGetWikidataProperty(predicateURI);
+	}
 
-			List<MonolingualTextValue> labels = generateLabels(predicateURI1);
+	private PropertyIdValue createOrGetWikidataProperty(final String propertyIdentifier) {
+
+		return gdmPropertyURIWikidataPropertyMap.computeIfAbsent(propertyIdentifier, propertyIdentifier1 -> {
+
+			List<MonolingualTextValue> labels = generateLabels(propertyIdentifier1);
 
 			// TODO: add datatype (?) - e.g. all literals are strings and all resources are ?
 			final PropertyDocument wikidataProperty = Datamodel.makePropertyDocument(null, labels, null, null, null);
@@ -183,6 +208,82 @@ public class WikidataDswarmImporter {
 		}
 
 		return Optional.empty();
+	}
+
+	private Optional<List<Snak>> processGDMQualifiedAttributes(final Statement statement) {
+
+		final List<Snak> snakList = new ArrayList<>();
+
+		final Optional<Snak> optionalConfidence = processGDMQualifiedAttribute(CONFIDENCE_QUALIFIED_ATTRIBUTE_IDENTIFIER, statement.getConfidence());
+		final Optional<Snak> optionalEvidence = processGDMQualifiedAttribute(EVIDENCE_QUALIFIED_ATTRIBUTE_IDENTIFIER, statement.getEvidence());
+		final Optional<Snak> optionalOrder = processGDMQualifiedAttribute(ORDER_QUALIFIED_ATTRIBUTE_IDENTIFIER, statement.getOrder());
+
+		// D:SWARM statement uuid
+		final Optional<Snak> optionalUUID = processGDMQualifiedAttribute(STATEMENT_UUID_QUALIFIED_ATTRIBUTE_IDENTIFIER, statement.getUUID());
+
+		addToSnakList(optionalConfidence, snakList);
+		addToSnakList(optionalEvidence, snakList);
+		addToSnakList(optionalOrder, snakList);
+		addToSnakList(optionalUUID, snakList);
+
+		if(snakList.isEmpty()) {
+
+			return Optional.empty();
+		}
+
+		return Optional.of(snakList);
+	}
+
+	private Optional<Snak> processGDMQualifiedAttribute(final String qualifiedAttributeIdentifier, final Object qualifiedAttributeValue) {
+
+		if(qualifiedAttributeValue == null) {
+
+			return Optional.empty();
+		}
+
+		final PropertyIdValue wikidataProperty = createOrGetWikidataProperty(qualifiedAttributeIdentifier);
+
+		final Value value;
+
+		switch(qualifiedAttributeIdentifier) {
+
+			case CONFIDENCE_QUALIFIED_ATTRIBUTE_IDENTIFIER:
+			case EVIDENCE_QUALIFIED_ATTRIBUTE_IDENTIFIER:
+			case STATEMENT_UUID_QUALIFIED_ATTRIBUTE_IDENTIFIER:
+
+				// string
+
+				value = Datamodel.makeStringValue((String) qualifiedAttributeValue);
+
+				break;
+			case ORDER_QUALIFIED_ATTRIBUTE_IDENTIFIER:
+
+				// long
+
+				// TODO: no number/long specific datatype available?
+
+				// order as string for now (maybe this qualified attribute is not really needed)
+				value = Datamodel.makeStringValue((String) qualifiedAttributeValue);
+
+				break;
+			default:
+
+				// TODO: log something (?)
+
+				return Optional.empty();
+		}
+
+		final Snak snak = Datamodel.makeValueSnak(wikidataProperty, value);
+
+		return Optional.of(snak);
+	}
+
+	private void addToSnakList(final Optional<Snak> optionalSnak, final List<Snak> snakList) {
+
+		if(optionalSnak.isPresent()) {
+
+			snakList.add(optionalSnak.get());
+		}
 	}
 
 	private ItemIdValue processGDMResourceNode(final ResourceNode resourceNode) {
