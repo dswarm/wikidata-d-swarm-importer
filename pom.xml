@@ -26,6 +26,7 @@
 		<!-- note this version is built from sources () and must be deployed at your local maven repository before building this project -->
 		<version.wdtk-datamodel>0.5.0-SNAPSHOT</version.wdtk-datamodel>
 		<version.dswarm.graph.json>0.0.4-SNAPSHOT</version.dswarm.graph.json>
+		<version.jersey-client>2.17</version.jersey-client>
 		<junit.version>4.12</junit.version>
 		<version.slf4j.api>1.7.12</version.slf4j.api>
 		<version.logback>1.1.3</version.logback>
@@ -197,6 +198,17 @@
 			<groupId>org.dswarm</groupId>
 			<artifactId>graph-json</artifactId>
 			<version>${version.dswarm.graph.json}</version>
+		</dependency>
+		<!-- for HTTP API requests -->
+		<dependency>
+			<groupId>org.glassfish.jersey.media</groupId>
+			<artifactId>jersey-media-multipart</artifactId>
+			<version>${version.jersey-client}</version>
+		</dependency>
+		<dependency>
+			<groupId>org.glassfish.jersey.core</groupId>
+			<artifactId>jersey-client</artifactId>
+			<version>${version.jersey-client}</version>
 		</dependency>
 		<!-- Logging -->
 		<dependency>
