@@ -115,9 +115,19 @@ public class WikibaseAPIClient {
 	private final String                 editToken;
 	private final Map<String, NewCookie> cookies;
 
-	public WikibaseAPIClient() {
+	public WikibaseAPIClient() throws WikidataImporterException {
 
 		final Map<String, Map<String, NewCookie>> result = generateEditToken();
+
+		if (result == null) {
+
+			final String message = "couldn't generate edit token successfully - API cannot be utilised for edit requests";
+
+			LOG.error(message);
+
+			throw new WikidataImporterException(message);
+		}
+
 		final Map.Entry<String, Map<String, NewCookie>> resultEntry = result.entrySet().iterator().next();
 
 		editToken = resultEntry.getKey();
@@ -139,7 +149,12 @@ public class WikibaseAPIClient {
 			// 1.2 get cookies from login request response
 			final Map<String, NewCookie> loginRequestCookies = getCookies(loginResponse);
 
-			// TODO null check
+			if (token == null || loginRequestCookies == null) {
+
+				LOG.error("couldn't retrieve token successfully - cannot continue edit token generation");
+
+				return Observable.empty();
+			}
 
 			// 2. confirm login request
 			return confirmLogin(token, loginRequestCookies).flatMap(confirmLoginResponse -> {
@@ -147,7 +162,12 @@ public class WikibaseAPIClient {
 				// 2.1 get cookies from login confirm response
 				final Map<String, NewCookie> confirmLoginCookies = getCookies(confirmLoginResponse);
 
-				// TODO null check
+				if (confirmLoginCookies == null) {
+
+					LOG.error("couldn't confirm login token successfully - cannot continue edit token generation");
+
+					return Observable.empty();
+				}
 
 				// 3. retrieve edit token request
 				return retrieveEditToken(confirmLoginCookies).map(retrieveEditTokenResponse -> {
@@ -158,10 +178,15 @@ public class WikibaseAPIClient {
 					// 3.2 get cookies from edit token response
 					final Map<String, NewCookie> editTokenCookies = getCookies(retrieveEditTokenResponse);
 
+					if (editTokenCookies == null) {
+
+						LOG.error("couldn't retrieve edit token successfully - cannot continue edit token generation");
+
+						return null;
+					}
+
 					// 3.3 merge cookies from response from 2 + 3
 					loginRequestCookies.putAll(editTokenCookies);
-
-					// TODO null check
 
 					final Map<String, Map<String, NewCookie>> result = new HashMap<>();
 					result.put(editToken, loginRequestCookies);
@@ -218,26 +243,44 @@ public class WikibaseAPIClient {
 
 			final String responseBody = loginResponse.readEntity(String.class);
 
-			// TODO null check
+			if (responseBody == null) {
+
+				LOG.error("cannot extract token - response body is not available");
+
+				return null;
+			}
 
 			final ObjectNode json = MAPPER.readValue(responseBody, ObjectNode.class);
 
-			// TODO null check
+			if (json == null) {
+
+				LOG.error("cannot extract token - response JSON is not available");
+
+				return null;
+			}
 
 			final JsonNode loginNode = json.get(MEDIAWIKI_API_LOGIN);
 
-			// TODO null check
+			if (loginNode == null) {
+
+				LOG.error("cannot extract token - '{}' node is not available in response JSON '{}'", MEDIAWIKI_API_LOGIN, responseBody);
+
+				return null;
+			}
 
 			final JsonNode tokenNode = loginNode.get(MEDIAWIKI_API_TOKEN_IDENTIFIER);
 
-			// TODO null check
+			if (tokenNode == null) {
+
+				LOG.error("cannot extract token - '{}' node is not available in response JSON '{}'", MEDIAWIKI_API_TOKEN_IDENTIFIER, responseBody);
+
+				return null;
+			}
 
 			return tokenNode.asText();
 		} catch (final Exception e) {
 
-			e.printStackTrace();
-
-			// TODO wrap/delegate error
+			LOG.error("cannot extract token - an error occurred while trying to extract the token from the response body", e);
 
 			return null;
 		}
@@ -249,30 +292,55 @@ public class WikibaseAPIClient {
 
 			final String responseBody = editTokenResponse.readEntity(String.class);
 
-			// TODO null check
+			if (responseBody == null) {
+
+				LOG.error("cannot extract edit token - response body is not available");
+
+				return null;
+			}
 
 			final ObjectNode json = MAPPER.readValue(responseBody, ObjectNode.class);
 
-			// TODO null check
+			if (json == null) {
+
+				LOG.error("cannot extract edit token - response JSON is not available");
+
+				return null;
+			}
 
 			final JsonNode queryNode = json.get(MEDIAWIKI_API_QUERY);
 
-			// TODO null check
+			if (queryNode == null) {
+
+				LOG.error("cannot extract edit token - '{}' node is not available in response JSON '{}'", MEDIAWIKI_API_QUERY, responseBody);
+
+				return null;
+			}
 
 			final JsonNode tokensNode = queryNode.get(MEDIAWIKI_API_TOKENS_IDENTIFIER);
 
-			// TODO null check
+			if (tokensNode == null) {
+
+				LOG.error("cannot extract edit token - '{}' node is not available in response JSON '{}'", MEDIAWIKI_API_TOKENS_IDENTIFIER,
+						responseBody);
+
+				return null;
+			}
 
 			final JsonNode csrfTokenNode = tokensNode.get(MEDIAWIKI_API_CSRFTOKEN_IDENTIFIER);
 
-			// TODO null check
+			if (csrfTokenNode == null) {
+
+				LOG.error("cannot extract edit token - '{}' node is not available in response JSON '{}'", MEDIAWIKI_API_CSRFTOKEN_IDENTIFIER,
+						responseBody);
+
+				return null;
+			}
 
 			return csrfTokenNode.asText();
 		} catch (final Exception e) {
 
-			e.printStackTrace();
-
-			// TODO wrap/delegate error
+			LOG.error("cannot extract edit token - an error occurred while trying to extract the edit token from the response body", e);
 
 			return null;
 		}

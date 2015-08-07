@@ -28,6 +28,9 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 
+import javax.ws.rs.core.Response;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.wikidata.wdtk.datamodel.helpers.Datamodel;
@@ -60,10 +63,10 @@ public class WikidataDswarmImporter {
 
 	private static final Logger LOG = LoggerFactory.getLogger(WikidataDswarmImporter.class);
 
-	public static final String LANGUAGE_CODE_EN                          = "en";
-	public static final String CONFIDENCE_QUALIFIED_ATTRIBUTE_IDENTIFIER = "confidence";
-	public static final String EVIDENCE_QUALIFIED_ATTRIBUTE_IDENTIFIER   = "evidence";
-	public static final String ORDER_QUALIFIED_ATTRIBUTE_IDENTIFIER      = "order";
+	public static final String LANGUAGE_CODE_EN                              = "en";
+	public static final String CONFIDENCE_QUALIFIED_ATTRIBUTE_IDENTIFIER     = "confidence";
+	public static final String EVIDENCE_QUALIFIED_ATTRIBUTE_IDENTIFIER       = "evidence";
+	public static final String ORDER_QUALIFIED_ATTRIBUTE_IDENTIFIER          = "order";
 	public static final String STATEMENT_UUID_QUALIFIED_ATTRIBUTE_IDENTIFIER = "statement uuid";
 
 	private final AtomicLong resourceCount = new AtomicLong();
@@ -71,19 +74,34 @@ public class WikidataDswarmImporter {
 	private static final Map<String, ItemIdValue>     gdmResourceURIWikidataItemMap     = new HashMap<>();
 	private static final Map<String, PropertyIdValue> gdmPropertyURIWikidataPropertyMap = new HashMap<>();
 
+	private final WikibaseAPIClient wikibaseAPIClient;
+
+	public WikidataDswarmImporter() throws WikidataImporterException {
+
+		wikibaseAPIClient = new WikibaseAPIClient();
+	}
+
 	public void importGDMModel(final String filePath) throws IOException {
 
 		final Observable<Resource> gdmModel = getGDMModel(filePath);
 
 		gdmModel.map(resource -> {
 
-			processGDMResource(resource);
+			try {
+
+				processGDMResource(resource);
+			} catch (final JsonProcessingException e) {
+
+				e.printStackTrace();
+
+				// TODO: log something or throw/wrap an error
+			}
 
 			return resource;
 		});
 	}
 
-	private void processGDMResource(final Resource resource) {
+	private void processGDMResource(final Resource resource) throws JsonProcessingException {
 
 		resourceCount.incrementAndGet();
 
@@ -103,7 +121,8 @@ public class WikidataDswarmImporter {
 
 				if (!optionalWikidataStmt.isPresent()) {
 
-					// TODO: log non-created statements
+					// log non-created statements
+					LOG.debug("could not process statement '{}'", printGDMStatement(gdmStatement));
 
 					continue;
 				}
@@ -121,6 +140,11 @@ public class WikidataDswarmImporter {
 		// we can also create an item with all it's statements at once, i.e., this would save some HTTP API calls
 		// TODO: check ItemIdValue in map (i.e. whether an wikidata for this gdm resource exists already, or not)
 		final ItemDocument wikidataItem = Datamodel.makeItemDocument(null, labels, null, null, statementGroups, null);
+
+		// create item at wikibase (check whether statements are created as well - otherwise we need to create them separately)
+		final Observable<Response> createEntityResponse = wikibaseAPIClient.createEntity(wikidataItem);
+
+		// TODO: evaluate response, e.g., cache item id somewhere
 	}
 
 	/**
@@ -159,7 +183,7 @@ public class WikidataDswarmImporter {
 
 		final List<SnakGroup> snakGroups;
 
-		if(wikidataQualifiers.isPresent()) {
+		if (wikidataQualifiers.isPresent()) {
 
 			final SnakGroup snakGroup = Datamodel.makeSnakGroup(wikidataQualifiers.get());
 
@@ -192,8 +216,18 @@ public class WikidataDswarmImporter {
 			// TODO: add datatype (?) - e.g. all literals are strings and all resources are ?
 			final PropertyDocument wikidataProperty = Datamodel.makePropertyDocument(null, labels, null, null, null);
 
-			// TODO: create Property at Wikibase (to have a generated Property identifier)
+			// create Property at Wikibase (to have a generated Property identifier)
+			try {
 
+				final Observable<Response> createEntityResponse = wikibaseAPIClient.createEntity(wikidataProperty);
+			} catch (final JsonProcessingException e) {
+
+				e.printStackTrace();
+
+				// TODO: log something or throw/wrap an error
+			}
+
+			// TODO: return property id from response
 			return wikidataProperty.getPropertyId();
 		});
 	}
@@ -241,7 +275,7 @@ public class WikidataDswarmImporter {
 		addToSnakList(optionalOrder, snakList);
 		addToSnakList(optionalUUID, snakList);
 
-		if(snakList.isEmpty()) {
+		if (snakList.isEmpty()) {
 
 			return Optional.empty();
 		}
@@ -251,7 +285,7 @@ public class WikidataDswarmImporter {
 
 	private Optional<Snak> processGDMQualifiedAttribute(final String qualifiedAttributeIdentifier, final Object qualifiedAttributeValue) {
 
-		if(qualifiedAttributeValue == null) {
+		if (qualifiedAttributeValue == null) {
 
 			return Optional.empty();
 		}
@@ -260,7 +294,7 @@ public class WikidataDswarmImporter {
 
 		final Value value;
 
-		switch(qualifiedAttributeIdentifier) {
+		switch (qualifiedAttributeIdentifier) {
 
 			case CONFIDENCE_QUALIFIED_ATTRIBUTE_IDENTIFIER:
 			case EVIDENCE_QUALIFIED_ATTRIBUTE_IDENTIFIER:
@@ -283,7 +317,7 @@ public class WikidataDswarmImporter {
 				break;
 			default:
 
-				// TODO: log something (?)
+				LOG.debug("found an unknown qualified attribute '{}'", qualifiedAttributeIdentifier);
 
 				return Optional.empty();
 		}
@@ -295,7 +329,7 @@ public class WikidataDswarmImporter {
 
 	private void addToSnakList(final Optional<Snak> optionalSnak, final List<Snak> snakList) {
 
-		if(optionalSnak.isPresent()) {
+		if (optionalSnak.isPresent()) {
 
 			snakList.add(optionalSnak.get());
 		}
@@ -311,8 +345,18 @@ public class WikidataDswarmImporter {
 
 			final ItemDocument wikidataItem = Datamodel.makeItemDocument(null, labels, null, null, null, null);
 
-			// TODO: create Item at Wikibase (to have a generated Item identifier)
+			// create Item at Wikibase (to have a generated Item identifier)
+			try {
 
+				final Observable<Response> createEntityResponse = wikibaseAPIClient.createEntity(wikidataItem);
+			} catch (final JsonProcessingException e) {
+
+				e.printStackTrace();
+
+				// TODO: log something or throw/wrap an error
+			}
+
+			// TODO: return item id from response item
 			return wikidataItem.getItemId();
 		});
 	}
@@ -341,5 +385,99 @@ public class WikidataDswarmImporter {
 		labels.add(label);
 
 		return labels;
+	}
+
+	private static String printGDMStatement(final Statement statement) {
+
+		final StringBuilder sb = new StringBuilder();
+
+		final Long id = statement.getId();
+
+		sb.append("{statement: id ='");
+
+		if (id != null) {
+
+			sb.append(id);
+		} else {
+
+			sb.append("no statement id available");
+		}
+
+		sb.append("' :: ");
+
+		final String uuid = statement.getUUID();
+
+		sb.append("uuid = '");
+
+		if (uuid != null) {
+
+			sb.append(uuid);
+		} else {
+
+			sb.append("no uuid available");
+		}
+
+		sb.append("' :: ");
+
+		final String subject = printGDMNode(statement.getSubject());
+
+		sb.append("subject = '").append(subject).append("' :: ");
+
+		final String predicateURI = statement.getPredicate().getUri();
+
+		sb.append("predicate = '").append(predicateURI).append("' :: ");
+
+		final String object = printGDMNode(statement.getObject());
+
+		sb.append("object = '").append(object).append("'}");
+
+		return sb.toString();
+	}
+
+	private static String printGDMNode(final Node node) {
+
+		final StringBuilder sb = new StringBuilder();
+
+		final Long id = node.getId();
+
+		sb.append("id = '");
+
+		if (id != null) {
+
+			sb.append(id);
+		} else {
+
+			sb.append("no node id available");
+		}
+
+		final NodeType nodeType = node.getType();
+
+		switch (nodeType) {
+
+			case Literal:
+
+				sb.append("' :: ");
+
+				final LiteralNode literalNode = (LiteralNode) node;
+				final String value = literalNode.getValue();
+
+				sb.append("value = '").append(value);
+
+				break;
+			case Resource:
+
+				sb.append("' :: ");
+
+				final ResourceNode resourceNode = (ResourceNode) node;
+				final String resourceURI = resourceNode.getUri();
+
+				sb.append("uri = '").append(resourceURI);
+
+				break;
+		}
+
+		sb.append("' :: type = '").append(nodeType).append("'}");
+
+		return sb.toString();
 	}
 }
