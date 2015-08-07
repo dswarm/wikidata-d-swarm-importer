@@ -18,6 +18,7 @@ import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.NewCookie;
 import javax.ws.rs.core.Response;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -33,7 +34,12 @@ import org.glassfish.jersey.media.multipart.FormDataMultiPart;
 import org.glassfish.jersey.media.multipart.MultiPartFeature;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.wikidata.wdtk.datamodel.implementation.ItemDocumentImpl;
+import org.wikidata.wdtk.datamodel.implementation.PropertyDocumentImpl;
 import org.wikidata.wdtk.datamodel.interfaces.EntityDocument;
+import org.wikidata.wdtk.datamodel.json.jackson.JacksonItemDocument;
+import org.wikidata.wdtk.datamodel.json.jackson.JacksonPropertyDocument;
+import org.wikidata.wdtk.datamodel.json.jackson.JacksonTermedStatementDocument;
 import rx.Observable;
 import rx.schedulers.Schedulers;
 
@@ -106,11 +112,15 @@ public class WikibaseAPIClient {
 	private static final String MEDIAWIKI_API_JSON_FORMAT          = "json";
 	private static final String MEDIAWIKI_API_TOKENS_IDENTIFIER    = "tokens";
 	private static final String MEDIAWIKI_API_CSRFTOKEN_IDENTIFIER = "csrftoken";
-	private static final String WIKIBASE_API_ITEM_IDENTIFIER       = "item";
+
+	public static final String WIKIBASE_API_ENTITY_TYPE_ITEM     = "item";
+	public static final String WIKIBASE_API_ENTITY_TYPE_PROPERTY = "property";
 
 	private static final String WIKIBASE_API_EDIT_ENTITY = "wbeditentity";
 
-	private static final ObjectMapper MAPPER = new ObjectMapper();
+	private static final ObjectMapper MAPPER = new ObjectMapper()
+			.setSerializationInclusion(JsonInclude.Include.NON_EMPTY)
+			.setSerializationInclusion(JsonInclude.Include.NON_NULL);
 
 	private final String                 editToken;
 	private final Map<String, NewCookie> cookies;
@@ -232,7 +242,8 @@ public class WikibaseAPIClient {
 		final FormDataMultiPart form = new FormDataMultiPart()
 				.field(MEDIAWIKI_API_ACTION_IDENTIFIER, MEDIAWIKI_API_QUERY)
 				.field(MEDIAWIKI_API_META_IDENTIFIER, MEDIAWIKI_API_TOKENS_IDENTIFIER)
-				.field(MEDIAWIKI_API_CONTINUE_IDENTIFIER, "");
+				.field(MEDIAWIKI_API_CONTINUE_IDENTIFIER, "")
+				.field(MEDIAWIKI_API_FORMAT_IDENTIFIER, MEDIAWIKI_API_JSON_FORMAT);
 
 		return excutePOST(rx, form);
 	}
@@ -346,18 +357,44 @@ public class WikibaseAPIClient {
 		}
 	}
 
-	public Observable<Response> createEntity(final EntityDocument entity)
-			throws JsonProcessingException {
+	public Observable<Response> createEntity(final EntityDocument entity, final String entityType)
+			throws JsonProcessingException, WikidataImporterException {
 
-		final String entityJSONString = MAPPER.writeValueAsString(entity);
+		final JacksonTermedStatementDocument jacksonEntity;
+
+		switch (entityType) {
+
+			case WIKIBASE_API_ENTITY_TYPE_ITEM:
+
+				jacksonEntity = JacksonItemDocument.fromItemDocumentImpl((ItemDocumentImpl) entity);
+
+				break;
+			case WIKIBASE_API_ENTITY_TYPE_PROPERTY:
+
+				jacksonEntity = JacksonPropertyDocument.fromPropertyDocumentImpl((PropertyDocumentImpl) entity);
+
+				break;
+			default:
+
+				final String message = String.format("unknown entity type '%s'", entityType);
+
+				LOG.error(message);
+
+				throw new WikidataImporterException(message);
+		}
+
+		final String entityJSONString = MAPPER.writeValueAsString(jacksonEntity);
+
+		LOG.debug("create new '{}' with '{}'", entityType, entityJSONString);
 
 		final RxObservableInvoker rx = buildBaseRequestWithCookies(cookies);
 
 		final FormDataMultiPart form = new FormDataMultiPart()
 				.field(MEDIAWIKI_API_ACTION_IDENTIFIER, WIKIBASE_API_EDIT_ENTITY)
-				.field(WIKIBASE_API_NEW_IDENTIFIER, WIKIBASE_API_ITEM_IDENTIFIER)
+				.field(WIKIBASE_API_NEW_IDENTIFIER, entityType)
 				.field(WIKIBASE_API_DATA_IDENTIFIER, entityJSONString)
-				.field(MEDIAWIKI_API_TOKEN_IDENTIFIER, editToken);
+				.field(MEDIAWIKI_API_TOKEN_IDENTIFIER, editToken)
+				.field(MEDIAWIKI_API_FORMAT_IDENTIFIER, MEDIAWIKI_API_JSON_FORMAT);
 		//form.bodyPart(entityJSONString, MediaType.APPLICATION_JSON_TYPE);
 
 		return excutePOST(rx, form);

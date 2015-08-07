@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import javax.ws.rs.core.Response;
@@ -35,14 +36,18 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.wikidata.wdtk.datamodel.helpers.Datamodel;
 import org.wikidata.wdtk.datamodel.interfaces.Claim;
+import org.wikidata.wdtk.datamodel.interfaces.DatatypeIdValue;
 import org.wikidata.wdtk.datamodel.interfaces.ItemDocument;
 import org.wikidata.wdtk.datamodel.interfaces.ItemIdValue;
 import org.wikidata.wdtk.datamodel.interfaces.MonolingualTextValue;
 import org.wikidata.wdtk.datamodel.interfaces.PropertyDocument;
 import org.wikidata.wdtk.datamodel.interfaces.PropertyIdValue;
+import org.wikidata.wdtk.datamodel.interfaces.Reference;
+import org.wikidata.wdtk.datamodel.interfaces.SiteLink;
 import org.wikidata.wdtk.datamodel.interfaces.Snak;
 import org.wikidata.wdtk.datamodel.interfaces.SnakGroup;
 import org.wikidata.wdtk.datamodel.interfaces.StatementGroup;
+import org.wikidata.wdtk.datamodel.interfaces.StatementRank;
 import org.wikidata.wdtk.datamodel.interfaces.Value;
 import org.wikidata.wdtk.datamodel.interfaces.ValueSnak;
 import rx.Observable;
@@ -68,8 +73,10 @@ public class WikidataDswarmImporter {
 	public static final String EVIDENCE_QUALIFIED_ATTRIBUTE_IDENTIFIER       = "evidence";
 	public static final String ORDER_QUALIFIED_ATTRIBUTE_IDENTIFIER          = "order";
 	public static final String STATEMENT_UUID_QUALIFIED_ATTRIBUTE_IDENTIFIER = "statement uuid";
+	public static final String MEDIAWIKI_PROPERTY_ID_PREFIX                  = "P";
 
-	private final AtomicLong resourceCount = new AtomicLong();
+	private final AtomicLong    resourceCount     = new AtomicLong();
+	private final AtomicInteger propertyIdCounter = new AtomicInteger(100000);
 
 	private static final Map<String, ItemIdValue>     gdmResourceURIWikidataItemMap     = new HashMap<>();
 	private static final Map<String, PropertyIdValue> gdmPropertyURIWikidataPropertyMap = new HashMap<>();
@@ -90,18 +97,22 @@ public class WikidataDswarmImporter {
 			try {
 
 				processGDMResource(resource);
-			} catch (final JsonProcessingException e) {
+			} catch (final Exception e) {
 
-				e.printStackTrace();
+				final String message = "something went wrong while processing this resource";
 
-				// TODO: log something or throw/wrap an error
+				LOG.error(message, e);
+
+				throw WikidataImporterError.wrap(new WikidataImporterException(message, e));
 			}
 
 			return resource;
-		});
+		}).toBlocking().firstOrDefault(null);
+
+		// TODO: return Observable (?)
 	}
 
-	private void processGDMResource(final Resource resource) throws JsonProcessingException {
+	private void processGDMResource(final Resource resource) throws JsonProcessingException, WikidataImporterException {
 
 		resourceCount.incrementAndGet();
 
@@ -142,9 +153,11 @@ public class WikidataDswarmImporter {
 		final ItemDocument wikidataItem = Datamodel.makeItemDocument(null, labels, null, null, statementGroups, null);
 
 		// create item at wikibase (check whether statements are created as well - otherwise we need to create them separately)
-		final Observable<Response> createEntityResponse = wikibaseAPIClient.createEntity(wikidataItem);
+		final Observable<Response> createEntityResponse = wikibaseAPIClient
+				.createEntity(wikidataItem, WikibaseAPIClient.WIKIBASE_API_ENTITY_TYPE_ITEM);
 
 		// TODO: evaluate response, e.g., cache item id somewhere
+		final Response response = createEntityResponse.toBlocking().firstOrDefault(null);
 	}
 
 	/**
@@ -181,23 +194,24 @@ public class WikidataDswarmImporter {
 		// process qualified attributes at GDM statement
 		final Optional<List<Snak>> wikidataQualifiers = processGDMQualifiedAttributes(statement);
 
-		final List<SnakGroup> snakGroups;
+		final List<SnakGroup> snakGroups = new ArrayList<>();
 
 		if (wikidataQualifiers.isPresent()) {
 
 			final SnakGroup snakGroup = Datamodel.makeSnakGroup(wikidataQualifiers.get());
 
-			snakGroups = new ArrayList<>();
 			snakGroups.add(snakGroup);
-		} else {
-
-			snakGroups = null;
 		}
 
 		final Claim claim = Datamodel.makeClaim(null, snak, snakGroups);
 
+		final List<Reference> references = new ArrayList<>();
+		final StatementRank rank = StatementRank.NORMAL;
+
 		// note: empty string for statement id (this should be utilised for statements that are created)
-		return Optional.ofNullable(Datamodel.makeStatement(claim, null, null, ""));
+		// note: Statement references cannot be null
+		// note: Statement rank cannot be null
+		return Optional.ofNullable(Datamodel.makeStatement(claim, references, rank, ""));
 	}
 
 	private PropertyIdValue processGDMPredicate(final Predicate predicate) {
@@ -211,23 +225,49 @@ public class WikidataDswarmImporter {
 
 		return gdmPropertyURIWikidataPropertyMap.computeIfAbsent(propertyIdentifier, propertyIdentifier1 -> {
 
-			List<MonolingualTextValue> labels = generateLabels(propertyIdentifier1);
+			final List<MonolingualTextValue> labels = generateLabels(propertyIdentifier1);
+			final List<MonolingualTextValue> descriptions = generateLabels(propertyIdentifier1);
+			final List<MonolingualTextValue> aliases = new ArrayList<>();
 
-			// TODO: add datatype (?) - e.g. all literals are strings and all resources are ?
-			final PropertyDocument wikidataProperty = Datamodel.makePropertyDocument(null, labels, null, null, null);
+			// add datatype - e.g. all literals are strings (DatatypeIdValue#DT_STRING) and all resources are items (DatatypeIdValue#DT_ITEM)
+			final DatatypeIdValue datatypeIdValue = Datamodel.makeDatatypeIdValue(DatatypeIdValue.DT_STRING);
+
+			// note: list of descriptions cannot be null
+			// note: list of aliases cannot be null
+			final PropertyDocument wikidataProperty = Datamodel.makePropertyDocument(null, labels, descriptions, aliases, datatypeIdValue);
 
 			// create Property at Wikibase (to have a generated Property identifier)
 			try {
 
-				final Observable<Response> createEntityResponse = wikibaseAPIClient.createEntity(wikidataProperty);
-			} catch (final JsonProcessingException e) {
+				final Observable<Response> createEntityResponse = wikibaseAPIClient.createEntity(wikidataProperty,
+						WikibaseAPIClient.WIKIBASE_API_ENTITY_TYPE_PROPERTY);
 
-				e.printStackTrace();
+				final Response response = createEntityResponse.toBlocking().firstOrDefault(null);
 
-				// TODO: log something or throw/wrap an error
+				if (response == null) {
+
+					final String message = String.format("could not create new property for '%s'", propertyIdentifier1);
+
+					LOG.error(message);
+
+					throw new WikidataImporterError(new WikidataImporterException(message));
+				}
+
+				final int status = response.getStatus();
+
+				LOG.debug("response status = {}", status);
+
+				final String responseBody = response.readEntity(String.class);
+
+				LOG.debug("response body = {}", responseBody);
+			} catch (final Exception e) {
+
+				final String message2 = "something went wrong, while trying to create a new property";
+
+				throw WikidataImporterError.wrap(new WikidataImporterException(message2, e));
 			}
 
-			// TODO: return property id from response
+			// TODO: return property id from response, i.e., deserialize response body
 			return wikidataProperty.getPropertyId();
 		});
 	}
@@ -342,18 +382,30 @@ public class WikidataDswarmImporter {
 		return gdmResourceURIWikidataItemMap.computeIfAbsent(resourceURI, resourceURI1 -> {
 
 			final List<MonolingualTextValue> labels = generateLabels(resourceURI);
+			final List<MonolingualTextValue> descriptions = generateLabels(resourceURI1);
+			final List<MonolingualTextValue> aliases = new ArrayList<>();
+			final List<StatementGroup> statementGroups = new ArrayList<>();
+			final Map<String, SiteLink> siteLinkMap = new HashMap<>();
 
-			final ItemDocument wikidataItem = Datamodel.makeItemDocument(null, labels, null, null, null, null);
+			// note: list of descriptions cannot be null
+			// note: list of aliases cannot be null
+			// note: list of statement groups cannot be null
+			final ItemDocument wikidataItem = Datamodel.makeItemDocument(null, labels, descriptions, aliases, statementGroups, siteLinkMap);
 
 			// create Item at Wikibase (to have a generated Item identifier)
 			try {
 
-				final Observable<Response> createEntityResponse = wikibaseAPIClient.createEntity(wikidataItem);
-			} catch (final JsonProcessingException e) {
+				final Observable<Response> createEntityResponse = wikibaseAPIClient
+						.createEntity(wikidataItem, WikibaseAPIClient.WIKIBASE_API_ENTITY_TYPE_ITEM);
 
-				e.printStackTrace();
+				final Response response = createEntityResponse.toBlocking().firstOrDefault(null);
+			} catch (final Exception e) {
 
-				// TODO: log something or throw/wrap an error
+				final String message = "something went wrong, while trying to create a new item";
+
+				LOG.error(message, e);
+
+				throw WikidataImporterError.wrap(new WikidataImporterException(message, e));
 			}
 
 			// TODO: return item id from response item
@@ -371,6 +423,8 @@ public class WikidataDswarmImporter {
 	}
 
 	private static InputStream getGDMModelStream(final String filePath) throws IOException {
+
+		LOG.debug("try to open input file @ '{}'", filePath);
 
 		final Path path = Paths.get(filePath);
 
