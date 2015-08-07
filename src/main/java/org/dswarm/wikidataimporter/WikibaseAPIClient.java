@@ -2,6 +2,7 @@ package org.dswarm.wikidataimporter;
 
 import java.io.IOException;
 import java.net.URL;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.ExecutorService;
@@ -43,13 +44,19 @@ public class WikibaseAPIClient {
 
 	private static final Logger LOG = LoggerFactory.getLogger(WikibaseAPIClient.class);
 
+	private static final Properties properties = new Properties();
+
+	private static final String MEDIAWIKI_API_ENDPOINT          = "mediawiki_api_endpoint";
+	private static final String FALLBACK_MEDIAWIKI_API_ENDPOINT = "http://localhost:1234/whoknows";
+	private static final String DSWARM_USER_AGENT_IDENTIFIER    = "DMP 2000";
+	private static final String MEDIAWIKI_USERNAME              = "mediawiki_username";
+	private static final String MEDIAWIKI_PASSWORD              = "mediawiki_password";
+
 	private static final String wikibaseAPIBaseURI;
-	public static final String DSWARM_USER_AGENT_IDENTIFIER = "DMP 2000";
 
 	static {
 
 		final URL resource = Resources.getResource("dswarm.properties");
-		final Properties properties = new Properties();
 
 		try {
 
@@ -59,7 +66,7 @@ public class WikibaseAPIClient {
 			LOG.error("Could not load dswarm.properties", e);
 		}
 
-		wikibaseAPIBaseURI = properties.getProperty("wikibase_api_endpoint", "http://localhost:1234/whoknows");
+		wikibaseAPIBaseURI = properties.getProperty(MEDIAWIKI_API_ENDPOINT, FALLBACK_MEDIAWIKI_API_ENDPOINT);
 	}
 
 	private static final String CHUNKED = "CHUNKED";
@@ -105,29 +112,64 @@ public class WikibaseAPIClient {
 
 	private static final ObjectMapper MAPPER = new ObjectMapper();
 
-	private final String editToken;
+	private final String                 editToken;
+	private final Map<String, NewCookie> cookies;
 
 	public WikibaseAPIClient() {
 
-		editToken = generateEditToken();
+		final Map<String, Map<String, NewCookie>> result = generateEditToken();
+		final Map.Entry<String, Map<String, NewCookie>> resultEntry = result.entrySet().iterator().next();
+
+		editToken = resultEntry.getKey();
+		cookies = resultEntry.getValue();
 	}
 
-	private String generateEditToken() {
+	private Map<String, Map<String, NewCookie>> generateEditToken() {
 
 		// 0. read user name + password from properties
+		final String username = getProperty(MEDIAWIKI_USERNAME);
+		final String password = getProperty(MEDIAWIKI_PASSWORD);
+
 		// 1. login request
-		// 1.1 get token from login request response
-		// 1.2 get cookies from login request response
-		// 2. confirm login request
-		// 2.1 get cookies from login confirm response
-		// 3. retrieve edit token request
-		// 3.1 get edit token from edit token response
-		// 3.2 get cookies from edit token response
-		// 3.3 merge cookies from response from 2 + 3
+		return login(username, password).flatMap(loginResponse -> {
 
-		// return edit token + cookies
+			// 1.1 get token from login request response
+			final String token = getToken(loginResponse);
 
-		return null;
+			// 1.2 get cookies from login request response
+			final Map<String, NewCookie> loginRequestCookies = getCookies(loginResponse);
+
+			// TODO null check
+
+			// 2. confirm login request
+			return confirmLogin(token, loginRequestCookies).flatMap(confirmLoginResponse -> {
+
+				// 2.1 get cookies from login confirm response
+				final Map<String, NewCookie> confirmLoginCookies = getCookies(confirmLoginResponse);
+
+				// TODO null check
+
+				// 3. retrieve edit token request
+				return retrieveEditToken(confirmLoginCookies).map(retrieveEditTokenResponse -> {
+
+					// 3.1 get edit token from edit token response
+					final String editToken = getEditToken(retrieveEditTokenResponse);
+
+					// 3.2 get cookies from edit token response
+					final Map<String, NewCookie> editTokenCookies = getCookies(retrieveEditTokenResponse);
+
+					// 3.3 merge cookies from response from 2 + 3
+					loginRequestCookies.putAll(editTokenCookies);
+
+					// TODO null check
+
+					final Map<String, Map<String, NewCookie>> result = new HashMap<>();
+					result.put(editToken, loginRequestCookies);
+
+					return result;
+				});
+			});
+		}).toBlocking().firstOrDefault(null);
 	}
 
 	public static Observable<Response> login(final String username, final String password) {
@@ -170,79 +212,73 @@ public class WikibaseAPIClient {
 		return excutePOST(rx, form);
 	}
 
-	public static Observable<String> getToken(final Observable<Response> loginResponse) {
+	public static String getToken(final Response loginResponse) {
 
-		return loginResponse.map(response1 -> {
+		try {
 
-			try {
+			final String responseBody = loginResponse.readEntity(String.class);
 
-				final String responseBody = response1.readEntity(String.class);
+			// TODO null check
 
-				// TODO null check
+			final ObjectNode json = MAPPER.readValue(responseBody, ObjectNode.class);
 
-				final ObjectNode json = MAPPER.readValue(responseBody, ObjectNode.class);
+			// TODO null check
 
-				// TODO null check
+			final JsonNode loginNode = json.get(MEDIAWIKI_API_LOGIN);
 
-				final JsonNode loginNode = json.get(MEDIAWIKI_API_LOGIN);
+			// TODO null check
 
-				// TODO null check
+			final JsonNode tokenNode = loginNode.get(MEDIAWIKI_API_TOKEN_IDENTIFIER);
 
-				final JsonNode tokenNode = loginNode.get(MEDIAWIKI_API_TOKEN_IDENTIFIER);
+			// TODO null check
 
-				// TODO null check
+			return tokenNode.asText();
+		} catch (final Exception e) {
 
-				return tokenNode.asText();
-			} catch (final Exception e) {
+			e.printStackTrace();
 
-				e.printStackTrace();
+			// TODO wrap/delegate error
 
-				// TODO wrap/delegate error
-
-				return null;
-			}
-		});
+			return null;
+		}
 	}
 
-	public static Observable<String> getEditToken(final Observable<Response> editTokenResponse) {
+	public static String getEditToken(final Response editTokenResponse) {
 
-		return editTokenResponse.map(response -> {
+		try {
 
-			try {
+			final String responseBody = editTokenResponse.readEntity(String.class);
 
-				final String responseBody = response.readEntity(String.class);
+			// TODO null check
 
-				// TODO null check
+			final ObjectNode json = MAPPER.readValue(responseBody, ObjectNode.class);
 
-				final ObjectNode json = MAPPER.readValue(responseBody, ObjectNode.class);
+			// TODO null check
 
-				// TODO null check
+			final JsonNode queryNode = json.get(MEDIAWIKI_API_QUERY);
 
-				final JsonNode queryNode = json.get(MEDIAWIKI_API_QUERY);
+			// TODO null check
 
-				// TODO null check
+			final JsonNode tokensNode = queryNode.get(MEDIAWIKI_API_TOKENS_IDENTIFIER);
 
-				final JsonNode tokensNode = queryNode.get(MEDIAWIKI_API_TOKENS_IDENTIFIER);
+			// TODO null check
 
-				// TODO null check
+			final JsonNode csrfTokenNode = tokensNode.get(MEDIAWIKI_API_CSRFTOKEN_IDENTIFIER);
 
-				final JsonNode csrfTokenNode = tokensNode.get(MEDIAWIKI_API_CSRFTOKEN_IDENTIFIER);
+			// TODO null check
 
-				// TODO null check
+			return csrfTokenNode.asText();
+		} catch (final Exception e) {
 
-				return csrfTokenNode.asText();
-			} catch (final Exception e) {
+			e.printStackTrace();
 
-				e.printStackTrace();
+			// TODO wrap/delegate error
 
-				// TODO wrap/delegate error
-
-				return null;
-			}
-		});
+			return null;
+		}
 	}
 
-	public static Observable<Response> createEntity(final EntityDocument entity, final String token, final Map<String, NewCookie> cookies)
+	public Observable<Response> createEntity(final EntityDocument entity)
 			throws JsonProcessingException {
 
 		final String entityJSONString = MAPPER.writeValueAsString(entity);
@@ -253,15 +289,15 @@ public class WikibaseAPIClient {
 				.field(MEDIAWIKI_API_ACTION_IDENTIFIER, WIKIBASE_API_EDIT_ENTITY)
 				.field(WIKIBASE_API_NEW_IDENTIFIER, WIKIBASE_API_ITEM_IDENTIFIER)
 				.field(WIKIBASE_API_DATA_IDENTIFIER, entityJSONString)
-				.field(MEDIAWIKI_API_TOKEN_IDENTIFIER, token);
+				.field(MEDIAWIKI_API_TOKEN_IDENTIFIER, editToken);
 		//form.bodyPart(entityJSONString, MediaType.APPLICATION_JSON_TYPE);
 
 		return excutePOST(rx, form);
 	}
 
-	public static Observable<Map<String, NewCookie>> getCookie(final Observable<Response> response) {
+	public static Map<String, NewCookie> getCookies(final Response response) {
 
-		return response.map(Response::getCookies);
+		return response.getCookies();
 	}
 
 	private static RxObservableInvoker buildBaseRequestWithCookies(final Map<String, NewCookie> cookies) {
@@ -335,5 +371,17 @@ public class WikibaseAPIClient {
 		final WebTarget target = target(path);
 
 		return RxObservable.from(target);
+	}
+
+	private static String getProperty(final String propertyKey) {
+
+		final String propertyValue = properties.getProperty(propertyKey);
+
+		if (propertyValue == null || propertyValue.trim().isEmpty()) {
+
+			LOG.error("couldn't find property '{}' in properties file", propertyKey);
+		}
+
+		return propertyValue;
 	}
 }
