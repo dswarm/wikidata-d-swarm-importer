@@ -28,6 +28,8 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import javax.ws.rs.core.Response;
 
@@ -76,15 +78,24 @@ public class WikidataDswarmImporter {
 
 	private static final Logger LOG = LoggerFactory.getLogger(WikidataDswarmImporter.class);
 
-	private static final String LANGUAGE_CODE_EN                              = "en";
-	private static final String CONFIDENCE_QUALIFIED_ATTRIBUTE_IDENTIFIER     = "confidence";
-	private static final String EVIDENCE_QUALIFIED_ATTRIBUTE_IDENTIFIER       = "evidence";
-	private static final String ORDER_QUALIFIED_ATTRIBUTE_IDENTIFIER          = "order";
-	private static final String STATEMENT_UUID_QUALIFIED_ATTRIBUTE_IDENTIFIER = "statement uuid";
-	private static final String MEDIAWIKI_PROPERTY_ID_PREFIX                  = "P";
-	private static final String MEDIAWIKI_SUCCESS_IDENTIFIER                  = "success";
-	private static final String MEDIAWIKI_ENTITY_IDENTIFIER                   = "entity";
-	private static final String VALUE_WAS_EMPTY_ORIGINALLY                    = "!!! VALUE WAS EMPTY ORIGINALLY !!!";
+	private static Pattern PROPERTY_PARAMETER_PATTERN = Pattern.compile("\\[\\[Property:(\\S+)\\|");
+
+	private static final String LANGUAGE_CODE_EN                                     = "en";
+	private static final String CONFIDENCE_QUALIFIED_ATTRIBUTE_IDENTIFIER            = "confidence";
+	private static final String EVIDENCE_QUALIFIED_ATTRIBUTE_IDENTIFIER              = "evidence";
+	private static final String ORDER_QUALIFIED_ATTRIBUTE_IDENTIFIER                 = "order";
+	private static final String STATEMENT_UUID_QUALIFIED_ATTRIBUTE_IDENTIFIER        = "statement uuid";
+	private static final String MEDIAWIKI_PROPERTY_ID_PREFIX                         = "P";
+	private static final String MEDIAWIKI_SUCCESS_IDENTIFIER                         = "success";
+	private static final String MEDIAWIKI_ENTITY_IDENTIFIER                          = "entity";
+	private static final String VALUE_WAS_EMPTY_ORIGINALLY                           = "!!! VALUE WAS EMPTY ORIGINALLY !!!";
+	public static final  String MEDIAWIKI_ERROR_IDENTIFIER                           = "error";
+	public static final  String MEDIAWIKI_CODE_IDENTIFIER                            = "code";
+	public static final  String MEDIAWIKI_FAILED_SAVE_ERROR_CODE                     = "failed-save";
+	public static final  String MEDIAWIKI_MESSAGES_IDENTIFIER                        = "messages";
+	public static final  String MEDIAWKI_NAME_IDENTIFIER                             = "name";
+	public static final  String WIKIBASE_VALIDATOR_LABEL_CONFLICT_ERROR_MESSAGE_NAME = "wikibase-validator-label-conflict";
+	public static final  String MEDIAWIKI_PARAMETERS_IDENTIFIER                      = "parameters";
 
 	private final AtomicLong    resourceCount     = new AtomicLong();
 	private final AtomicInteger propertyIdCounter = new AtomicInteger(100000);
@@ -282,33 +293,143 @@ public class WikidataDswarmImporter {
 						WikibaseAPIClient.WIKIBASE_API_ENTITY_TYPE_PROPERTY);
 
 				// TODO: handle duplicates, i.e., one can only create uniquely labelled properties in wikibase, otherwise "wikibase-validator-label-conflict" will be thrown
-				final JsonNode entityJSON = processEditEntityResponse(propertyIdentifier1, createEntityResponse,
+				final JsonNode entityOrErrorJSON = processEditEntityResponse(propertyIdentifier1, createEntityResponse,
 						WikibaseAPIClient.WIKIBASE_API_ENTITY_TYPE_PROPERTY);
-				final PropertyDocument propertyDocument = MAPPER.treeToValue(entityJSON, JacksonPropertyDocument.class);
 
-				if (propertyDocument == null) {
+				final JsonNode errorNode = entityOrErrorJSON.get(MEDIAWIKI_ERROR_IDENTIFIER);
 
-					final String message = String
-							.format("could not create new property for '%s'; could not deserialize response body", propertyIdentifier1);
+				if (errorNode == null) {
 
-					LOG.error(message);
+					// response JSON should be an entity
 
-					throw new WikidataImporterError(new WikidataImporterException(message));
+					final PropertyDocument propertyDocument = MAPPER.treeToValue(entityOrErrorJSON, JacksonPropertyDocument.class);
+
+					if (propertyDocument == null) {
+
+						final String message = String
+								.format("could not create new property for '%s'; could not deserialize response body", propertyIdentifier1);
+
+						LOG.error(message);
+
+						throw new WikidataImporterException(message);
+					}
+
+					final PropertyIdValue responsePropertyId = propertyDocument.getPropertyId();
+
+					if (responsePropertyId == null) {
+
+						final String message = String
+								.format("could not create new property for '%s'; response property id is not available", propertyIdentifier1);
+
+						LOG.error(message);
+
+						throw new WikidataImporterException(message);
+					}
+
+					return responsePropertyId;
 				}
 
-				final PropertyIdValue responsePropertyId = propertyDocument.getPropertyId();
+				// an error occurred
 
-				if (responsePropertyId == null) {
+				final JsonNode errorCodeJSON = errorNode.get(MEDIAWIKI_CODE_IDENTIFIER);
+
+				if (errorCodeJSON == null) {
 
 					final String message = String
-							.format("could not create new property for '%s'; response property id is not available", propertyIdentifier1);
+							.format("could not create new property for '%s'; an unknown error ('%s') occurred", propertyIdentifier1,
+									MAPPER.writeValueAsString(errorNode));
 
-					LOG.error(message);
-
-					throw new WikidataImporterError(new WikidataImporterException(message));
+					throw new WikidataImporterException(message);
 				}
 
-				return responsePropertyId;
+				final String errorCode = errorCodeJSON.asText();
+
+				if (!MEDIAWIKI_FAILED_SAVE_ERROR_CODE.equals(errorCode)) {
+
+					final String message = String
+							.format("could not create new property for '%s'; an error ('%s') occurred", propertyIdentifier1,
+									MAPPER.writeValueAsString(errorNode));
+
+					throw new WikidataImporterException(message);
+				}
+
+				final JsonNode messagesJSON = errorNode.get(MEDIAWIKI_MESSAGES_IDENTIFIER);
+
+				if (messagesJSON == null || messagesJSON.size() <= 0) {
+
+					final String message = String
+							.format("could not create new property for '%s'; an error ('%s') occurred", propertyIdentifier1,
+									MAPPER.writeValueAsString(errorNode));
+
+					throw new WikidataImporterException(message);
+				}
+
+				final JsonNode firstMessageNode = messagesJSON.get(0);
+
+				if (firstMessageNode == null) {
+
+					final String message = String
+							.format("could not create new property for '%s'; an error ('%s') occurred", propertyIdentifier1,
+									MAPPER.writeValueAsString(errorNode));
+
+					throw new WikidataImporterException(message);
+				}
+
+				final JsonNode errorMessageNameNode = firstMessageNode.get(MEDIAWKI_NAME_IDENTIFIER);
+
+				final String errorMessageName = errorMessageNameNode.asText();
+
+				if (!WIKIBASE_VALIDATOR_LABEL_CONFLICT_ERROR_MESSAGE_NAME.equals(errorMessageName)) {
+
+					final String message = String
+							.format("could not create new property for '%s'; an error ('%s') occurred", propertyIdentifier1,
+									MAPPER.writeValueAsString(errorNode));
+
+					throw new WikidataImporterException(message);
+				}
+
+				final JsonNode errorMessageParametersNode = firstMessageNode.get(MEDIAWIKI_PARAMETERS_IDENTIFIER);
+
+				if (errorMessageParametersNode == null || errorMessageParametersNode.size() < 3) {
+
+					final String message = String
+							.format("could not create new property for '%s'; an error ('%s') occurred", propertyIdentifier1,
+									MAPPER.writeValueAsString(errorNode));
+
+					throw new WikidataImporterException(message);
+				}
+
+				final JsonNode thirdErrorMessageParameterNode = errorMessageParametersNode.get(2);
+
+				if (thirdErrorMessageParameterNode == null) {
+
+					final String message = String
+							.format("could not create new property for '%s'; an error ('%s') occurred", propertyIdentifier1,
+									MAPPER.writeValueAsString(errorNode));
+
+					throw new WikidataImporterException(message);
+				}
+
+				// extract the property id from this value
+				final String thirdErrorMessageParameter = thirdErrorMessageParameterNode.asText();
+
+				final Optional<String> optionalPropertyId = findPropertyId(thirdErrorMessageParameter);
+
+				if (!optionalPropertyId.isPresent()) {
+
+					final String message = String
+							.format("could not create new property for '%s'; an error ('%s') occurred", propertyIdentifier1,
+									MAPPER.writeValueAsString(errorNode));
+
+					throw new WikidataImporterException(message);
+				}
+
+				final String propertyId = optionalPropertyId.get();
+
+				return Datamodel.makePropertyIdValue(propertyId, null);
+			} catch (final WikidataImporterException e1) {
+
+				throw WikidataImporterError.wrap(e1);
 			} catch (final Exception e) {
 
 				final String message2 = "something went wrong, while trying to create a new property";
@@ -360,6 +481,19 @@ public class WikidataDswarmImporter {
 			LOG.error(message);
 
 			throw new WikidataImporterError(new WikidataImporterException(message));
+		}
+
+		final JsonNode errorNode = responseJSON.get(MEDIAWIKI_ERROR_IDENTIFIER);
+
+		if (errorNode != null) {
+
+			final String message = String
+					.format("could not create new %s for '%s'; an error occurred ('%s').", type, entityIdentifier, responseBody);
+
+			LOG.debug(message);
+
+			// return error so that it can be handled at the client
+			return responseJSON;
 		}
 
 		final JsonNode successNode = responseJSON.get(MEDIAWIKI_SUCCESS_IDENTIFIER);
@@ -551,9 +685,12 @@ public class WikidataDswarmImporter {
 			final Observable<Response> createEntityResponse = wikibaseAPIClient
 					.createEntity(wikidataItem, WikibaseAPIClient.WIKIBASE_API_ENTITY_TYPE_ITEM);
 
-			final JsonNode entityJSON = processEditEntityResponse(resourceURI, createEntityResponse,
+			final JsonNode entityOrErrorJSON = processEditEntityResponse(resourceURI, createEntityResponse,
 					WikibaseAPIClient.WIKIBASE_API_ENTITY_TYPE_ITEM);
-			final ItemDocument itemDocument = MAPPER.treeToValue(entityJSON, JacksonItemDocument.class);
+
+			// TODO: implement handling from error responses
+
+			final ItemDocument itemDocument = MAPPER.treeToValue(entityOrErrorJSON, JacksonItemDocument.class);
 
 			if (itemDocument == null) {
 
@@ -708,5 +845,18 @@ public class WikidataDswarmImporter {
 		sb.append("' :: type = '").append(nodeType).append("'}");
 
 		return sb.toString();
+	}
+
+	private static Optional<String> findPropertyId(final String haystack) {
+
+		final Matcher matcher = PROPERTY_PARAMETER_PATTERN.matcher(haystack);
+		final boolean isMatch = matcher.find();
+
+		if (isMatch) {
+
+			return Optional.of(matcher.group(1));
+		}
+
+		return Optional.empty();
 	}
 }
