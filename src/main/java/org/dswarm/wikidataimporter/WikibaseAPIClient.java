@@ -34,10 +34,15 @@ import org.glassfish.jersey.media.multipart.FormDataMultiPart;
 import org.glassfish.jersey.media.multipart.MultiPartFeature;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.wikidata.wdtk.datamodel.helpers.DatamodelConverter;
 import org.wikidata.wdtk.datamodel.implementation.ItemDocumentImpl;
 import org.wikidata.wdtk.datamodel.implementation.PropertyDocumentImpl;
+import org.wikidata.wdtk.datamodel.interfaces.DataObjectFactory;
 import org.wikidata.wdtk.datamodel.interfaces.EntityDocument;
+import org.wikidata.wdtk.datamodel.interfaces.ItemDocument;
+import org.wikidata.wdtk.datamodel.interfaces.PropertyDocument;
 import org.wikidata.wdtk.datamodel.json.jackson.JacksonItemDocument;
+import org.wikidata.wdtk.datamodel.json.jackson.JacksonObjectFactory;
 import org.wikidata.wdtk.datamodel.json.jackson.JacksonPropertyDocument;
 import org.wikidata.wdtk.datamodel.json.jackson.JacksonTermedStatementDocument;
 import rx.Observable;
@@ -121,6 +126,9 @@ public class WikibaseAPIClient {
 	private static final ObjectMapper MAPPER = new ObjectMapper()
 			.setSerializationInclusion(JsonInclude.Include.NON_EMPTY)
 			.setSerializationInclusion(JsonInclude.Include.NON_NULL);
+
+	private static final DataObjectFactory  jsonOjbectFactory  = new JacksonObjectFactory();
+	private static final DatamodelConverter datamodelConverter = new DatamodelConverter(jsonOjbectFactory);
 
 	private final String                 editToken;
 	private final Map<String, NewCookie> cookies;
@@ -360,13 +368,14 @@ public class WikibaseAPIClient {
 	public Observable<Response> createEntity(final EntityDocument entity, final String entityType)
 			throws JsonProcessingException, WikidataImporterException {
 
-		final JacksonTermedStatementDocument jacksonEntity;
+		final EntityDocument jacksonEntity;
 
 		switch (entityType) {
 
 			case WIKIBASE_API_ENTITY_TYPE_ITEM:
 
-				jacksonEntity = JacksonItemDocument.fromItemDocumentImpl((ItemDocumentImpl) entity);
+				//jacksonEntity = JacksonItemDocument.fromItemDocumentImpl((ItemDocumentImpl) entity);
+				jacksonEntity = datamodelConverter.copy((ItemDocument) entity);
 
 				break;
 			case WIKIBASE_API_ENTITY_TYPE_PROPERTY:

@@ -31,7 +31,6 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import javax.ws.rs.core.Response;
 
-import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -56,9 +55,9 @@ import org.wikidata.wdtk.datamodel.interfaces.StatementGroup;
 import org.wikidata.wdtk.datamodel.interfaces.StatementRank;
 import org.wikidata.wdtk.datamodel.interfaces.Value;
 import org.wikidata.wdtk.datamodel.interfaces.ValueSnak;
+import org.wikidata.wdtk.datamodel.json.jackson.JacksonItemDocument;
 import org.wikidata.wdtk.datamodel.json.jackson.JacksonObjectFactory;
 import org.wikidata.wdtk.datamodel.json.jackson.JacksonPropertyDocument;
-import org.wikidata.wdtk.datamodel.json.jackson.JacksonTermedStatementDocument;
 import rx.Observable;
 
 import org.dswarm.graph.json.LiteralNode;
@@ -85,6 +84,7 @@ public class WikidataDswarmImporter {
 	private static final String MEDIAWIKI_PROPERTY_ID_PREFIX                  = "P";
 	private static final String MEDIAWIKI_SUCCESS_IDENTIFIER                  = "success";
 	private static final String MEDIAWIKI_ENTITY_IDENTIFIER                   = "entity";
+	private static final String VALUE_WAS_EMPTY_ORIGINALLY                    = "!!! VALUE WAS EMPTY ORIGINALLY !!!";
 
 	private final AtomicLong    resourceCount     = new AtomicLong();
 	private final AtomicInteger propertyIdCounter = new AtomicInteger(100000);
@@ -132,9 +132,13 @@ public class WikidataDswarmImporter {
 
 		resourceCount.incrementAndGet();
 
-		final List<MonolingualTextValue> labels = generateLabels(resource);
+		final String resourceURI = resource.getUri();
 
-		final List<org.wikidata.wdtk.datamodel.interfaces.Statement> wikidataStatements = new ArrayList<>();
+		final List<MonolingualTextValue> labels = generateLabels(resource);
+		final List<MonolingualTextValue> descriptions = generateLabels(resourceURI);
+		final List<MonolingualTextValue> aliases = new ArrayList<>();
+
+		final Map<String, List<org.wikidata.wdtk.datamodel.interfaces.Statement>> wikidataStatementsMap = new HashMap<>();
 
 		final Set<Statement> gdmStatements = resource.getStatements();
 
@@ -143,6 +147,15 @@ public class WikidataDswarmImporter {
 			// write statements (if available)
 
 			for (final Statement gdmStatement : gdmStatements) {
+
+				final String predicateURI = gdmStatement.getPredicate().getUri();
+
+				if (!wikidataStatementsMap.containsKey(predicateURI)) {
+
+					final List<org.wikidata.wdtk.datamodel.interfaces.Statement> wikidataStatements = new ArrayList<>();
+
+					wikidataStatementsMap.put(predicateURI, wikidataStatements);
+				}
 
 				final Optional<org.wikidata.wdtk.datamodel.interfaces.Statement> optionalWikidataStmt = processGDMStatement(gdmStatement);
 
@@ -156,24 +169,34 @@ public class WikidataDswarmImporter {
 
 				final org.wikidata.wdtk.datamodel.interfaces.Statement wikidataStmt = optionalWikidataStmt.get();
 
-				wikidataStatements.add(wikidataStmt);
+				wikidataStatementsMap.get(predicateURI).add(wikidataStmt);
 			}
 		}
 
-		final StatementGroup statementGroup = Datamodel.makeStatementGroup(wikidataStatements);
 		final List<StatementGroup> statementGroups = new ArrayList<>();
-		statementGroups.add(statementGroup);
+
+		// create statement groups property-wise
+		for (final Map.Entry<String, List<org.wikidata.wdtk.datamodel.interfaces.Statement>> statmentsPerPropertyEntry : wikidataStatementsMap
+				.entrySet()) {
+
+			final List<org.wikidata.wdtk.datamodel.interfaces.Statement> statementsPerProperty = statmentsPerPropertyEntry.getValue();
+
+			final StatementGroup statementGroup = Datamodel.makeStatementGroup(statementsPerProperty);
+
+			statementGroups.add(statementGroup);
+		}
+
+		final Map<String, SiteLink> siteLinkMap = new HashMap<>();
 
 		// we can also create an item with all it's statements at once, i.e., this would save some HTTP API calls
-		// TODO: check ItemIdValue in map (i.e. whether an wikidata for this gdm resource exists already, or not)
-		final ItemDocument wikidataItem = Datamodel.makeItemDocument(null, labels, null, null, statementGroups, null);
+		// TODO: check ItemIdValue in map (i.e. whether an wikidata for this gdm resource exists already, or not; because if it exists already, then we need to update the existing one, i.e., do a slightly different API call)
+		final ItemDocument wikidataItem = Datamodel.makeItemDocument(null, labels, descriptions, aliases, statementGroups, siteLinkMap);
 
 		// create item at wikibase (check whether statements are created as well - otherwise we need to create them separately)
-		final Observable<Response> createEntityResponse = wikibaseAPIClient
-				.createEntity(wikidataItem, WikibaseAPIClient.WIKIBASE_API_ENTITY_TYPE_ITEM);
+		final ItemIdValue itemIdValue = createWikidataItem(resourceURI, wikidataItem);
 
-		// TODO: evaluate response, e.g., cache item id somewhere
-		final Response response = createEntityResponse.toBlocking().firstOrDefault(null);
+		// add/update item id value at the resources items map
+		gdmResourceURIWikidataItemMap.putIfAbsent(resourceURI, itemIdValue);
 	}
 
 	/**
@@ -259,7 +282,8 @@ public class WikidataDswarmImporter {
 						WikibaseAPIClient.WIKIBASE_API_ENTITY_TYPE_PROPERTY);
 
 				// TODO: handle duplicates, i.e., one can only create uniquely labelled properties in wikibase, otherwise "wikibase-validator-label-conflict" will be thrown
-				final JsonNode entityJSON = processEditEntityResponse(propertyIdentifier1, createEntityResponse, WikibaseAPIClient.WIKIBASE_API_ENTITY_TYPE_PROPERTY);
+				final JsonNode entityJSON = processEditEntityResponse(propertyIdentifier1, createEntityResponse,
+						WikibaseAPIClient.WIKIBASE_API_ENTITY_TYPE_PROPERTY);
 				final PropertyDocument propertyDocument = MAPPER.treeToValue(entityJSON, JacksonPropertyDocument.class);
 
 				if (propertyDocument == null) {
@@ -294,7 +318,8 @@ public class WikidataDswarmImporter {
 		});
 	}
 
-	private JsonNode processEditEntityResponse(final String entityIdentifier, final Observable<Response> createEntityResponse, final String type) throws IOException {
+	private JsonNode processEditEntityResponse(final String entityIdentifier, final Observable<Response> createEntityResponse, final String type)
+			throws IOException {
 
 		final Response response = createEntityResponse.toBlocking().firstOrDefault(null);
 
@@ -342,7 +367,7 @@ public class WikidataDswarmImporter {
 		if (successNode == null) {
 
 			final String message = String
-					.format("could not create new %s for '%s'; no 'success' node in response", type, entityIdentifier);
+					.format("could not create new %s for '%s'; no 'success' node in response ('%s')", type, entityIdentifier, responseBody);
 
 			LOG.error(message);
 
@@ -366,7 +391,7 @@ public class WikidataDswarmImporter {
 		if (entityNode == null) {
 
 			final String message = String
-					.format("could not create new %s for '%s'; no 'entity' node in response", type, entityIdentifier);
+					.format("could not create new %s for '%s'; no 'entity' node in response ('%s')", type, entityIdentifier, responseBody);
 
 			LOG.error(message);
 
@@ -387,7 +412,19 @@ public class WikidataDswarmImporter {
 				final LiteralNode literalNode = (LiteralNode) object;
 				final String value = literalNode.getValue();
 
-				return Optional.ofNullable(Datamodel.makeStringValue(value));
+				final String finalValue;
+
+				if (!value.trim().isEmpty()) {
+
+					finalValue = value;
+				} else {
+
+					// empty values are not possible in Wikidata - insert placeholder for now
+
+					finalValue = VALUE_WAS_EMPTY_ORIGINALLY;
+				}
+
+				return Optional.ofNullable(Datamodel.makeStringValue(finalValue));
 			case Resource:
 
 				// create ItemIdValue, i.e., create a Wikidata Item just with the Id as label
@@ -485,36 +522,70 @@ public class WikidataDswarmImporter {
 
 		return gdmResourceURIWikidataItemMap.computeIfAbsent(resourceURI, resourceURI1 -> {
 
-			final List<MonolingualTextValue> labels = generateLabels(resourceURI);
-			final List<MonolingualTextValue> descriptions = generateLabels(resourceURI1);
-			final List<MonolingualTextValue> aliases = new ArrayList<>();
-			final List<StatementGroup> statementGroups = new ArrayList<>();
-			final Map<String, SiteLink> siteLinkMap = new HashMap<>();
-
-			// note: list of descriptions cannot be null
-			// note: list of aliases cannot be null
-			// note: list of statement groups cannot be null
-			final ItemDocument wikidataItem = Datamodel.makeItemDocument(null, labels, descriptions, aliases, statementGroups, siteLinkMap);
-
-			// create Item at Wikibase (to have a generated Item identifier)
 			try {
 
-				final Observable<Response> createEntityResponse = wikibaseAPIClient
-						.createEntity(wikidataItem, WikibaseAPIClient.WIKIBASE_API_ENTITY_TYPE_ITEM);
+				final List<MonolingualTextValue> labels = generateLabels(resourceURI);
+				final List<MonolingualTextValue> descriptions = generateLabels(resourceURI);
+				final List<MonolingualTextValue> aliases = new ArrayList<>();
+				final List<StatementGroup> statementGroups = new ArrayList<>();
+				final Map<String, SiteLink> siteLinkMap = new HashMap<>();
 
-				final Response response = createEntityResponse.toBlocking().firstOrDefault(null);
-			} catch (final Exception e) {
+				// note: list of descriptions cannot be null
+				// note: list of aliases cannot be null
+				// note: list of statement groups cannot be null
+				final ItemDocument wikidataItem = Datamodel.makeItemDocument(null, labels, descriptions, aliases, statementGroups, siteLinkMap);
 
-				final String message = "something went wrong, while trying to create a new item";
+				return createWikidataItem(resourceURI1, wikidataItem);
+			} catch (final WikidataImporterException e) {
 
-				LOG.error(message, e);
+				throw WikidataImporterError.wrap(e);
+			}
+		});
+	}
 
-				throw WikidataImporterError.wrap(new WikidataImporterException(message, e));
+	private ItemIdValue createWikidataItem(final String resourceURI, final ItemDocument wikidataItem) throws WikidataImporterException {
+
+		// create Item at Wikibase (to have a generated Item identifier)
+		try {
+
+			final Observable<Response> createEntityResponse = wikibaseAPIClient
+					.createEntity(wikidataItem, WikibaseAPIClient.WIKIBASE_API_ENTITY_TYPE_ITEM);
+
+			final JsonNode entityJSON = processEditEntityResponse(resourceURI, createEntityResponse,
+					WikibaseAPIClient.WIKIBASE_API_ENTITY_TYPE_ITEM);
+			final ItemDocument itemDocument = MAPPER.treeToValue(entityJSON, JacksonItemDocument.class);
+
+			if (itemDocument == null) {
+
+				final String message = String
+						.format("could not create new item for '%s'; could not deserialize response body", resourceURI);
+
+				LOG.error(message);
+
+				throw new WikidataImporterException(message);
 			}
 
-			// TODO: return item id from response item
-			return wikidataItem.getItemId();
-		});
+			final ItemIdValue responseItemId = itemDocument.getItemId();
+
+			if (responseItemId == null) {
+
+				final String message = String
+						.format("could not create new item for '%s'; response property id is not available", resourceURI);
+
+				LOG.error(message);
+
+				throw new WikidataImporterException(message);
+			}
+
+			return responseItemId;
+		} catch (final Exception e) {
+
+			final String message = "something went wrong, while trying to create a new item";
+
+			LOG.error(message, e);
+
+			throw new WikidataImporterException(message, e);
+		}
 	}
 
 	private static Observable<Resource> getGDMModel(final String filePath) throws IOException {
