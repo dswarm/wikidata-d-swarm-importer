@@ -31,11 +31,17 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import javax.ws.rs.core.Response;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.wikidata.wdtk.datamodel.helpers.Datamodel;
+import org.wikidata.wdtk.datamodel.helpers.DatamodelConverter;
 import org.wikidata.wdtk.datamodel.interfaces.Claim;
+import org.wikidata.wdtk.datamodel.interfaces.DataObjectFactory;
 import org.wikidata.wdtk.datamodel.interfaces.DatatypeIdValue;
 import org.wikidata.wdtk.datamodel.interfaces.ItemDocument;
 import org.wikidata.wdtk.datamodel.interfaces.ItemIdValue;
@@ -50,6 +56,9 @@ import org.wikidata.wdtk.datamodel.interfaces.StatementGroup;
 import org.wikidata.wdtk.datamodel.interfaces.StatementRank;
 import org.wikidata.wdtk.datamodel.interfaces.Value;
 import org.wikidata.wdtk.datamodel.interfaces.ValueSnak;
+import org.wikidata.wdtk.datamodel.json.jackson.JacksonObjectFactory;
+import org.wikidata.wdtk.datamodel.json.jackson.JacksonPropertyDocument;
+import org.wikidata.wdtk.datamodel.json.jackson.JacksonTermedStatementDocument;
 import rx.Observable;
 
 import org.dswarm.graph.json.LiteralNode;
@@ -68,18 +77,25 @@ public class WikidataDswarmImporter {
 
 	private static final Logger LOG = LoggerFactory.getLogger(WikidataDswarmImporter.class);
 
-	public static final String LANGUAGE_CODE_EN                              = "en";
-	public static final String CONFIDENCE_QUALIFIED_ATTRIBUTE_IDENTIFIER     = "confidence";
-	public static final String EVIDENCE_QUALIFIED_ATTRIBUTE_IDENTIFIER       = "evidence";
-	public static final String ORDER_QUALIFIED_ATTRIBUTE_IDENTIFIER          = "order";
-	public static final String STATEMENT_UUID_QUALIFIED_ATTRIBUTE_IDENTIFIER = "statement uuid";
-	public static final String MEDIAWIKI_PROPERTY_ID_PREFIX                  = "P";
+	private static final String LANGUAGE_CODE_EN                              = "en";
+	private static final String CONFIDENCE_QUALIFIED_ATTRIBUTE_IDENTIFIER     = "confidence";
+	private static final String EVIDENCE_QUALIFIED_ATTRIBUTE_IDENTIFIER       = "evidence";
+	private static final String ORDER_QUALIFIED_ATTRIBUTE_IDENTIFIER          = "order";
+	private static final String STATEMENT_UUID_QUALIFIED_ATTRIBUTE_IDENTIFIER = "statement uuid";
+	private static final String MEDIAWIKI_PROPERTY_ID_PREFIX                  = "P";
+	private static final String MEDIAWIKI_SUCCESS_IDENTIFIER                  = "success";
+	private static final String MEDIAWIKI_ENTITY_IDENTIFIER                   = "entity";
 
 	private final AtomicLong    resourceCount     = new AtomicLong();
 	private final AtomicInteger propertyIdCounter = new AtomicInteger(100000);
 
 	private static final Map<String, ItemIdValue>     gdmResourceURIWikidataItemMap     = new HashMap<>();
 	private static final Map<String, PropertyIdValue> gdmPropertyURIWikidataPropertyMap = new HashMap<>();
+
+	private static final DataObjectFactory  jsonOjbectFactory  = new JacksonObjectFactory();
+	private static final DatamodelConverter datamodelConverter = new DatamodelConverter(jsonOjbectFactory);
+
+	private static final ObjectMapper MAPPER = new ObjectMapper();
 
 	private final WikibaseAPIClient wikibaseAPIClient;
 
@@ -242,34 +258,122 @@ public class WikidataDswarmImporter {
 				final Observable<Response> createEntityResponse = wikibaseAPIClient.createEntity(wikidataProperty,
 						WikibaseAPIClient.WIKIBASE_API_ENTITY_TYPE_PROPERTY);
 
-				final Response response = createEntityResponse.toBlocking().firstOrDefault(null);
+				// TODO: handle duplicates, i.e., one can only create uniquely labelled properties in wikibase, otherwise "wikibase-validator-label-conflict" will be thrown
+				final JsonNode entityJSON = processEditEntityResponse(propertyIdentifier1, createEntityResponse, WikibaseAPIClient.WIKIBASE_API_ENTITY_TYPE_PROPERTY);
+				final PropertyDocument propertyDocument = MAPPER.treeToValue(entityJSON, JacksonPropertyDocument.class);
 
-				if (response == null) {
+				if (propertyDocument == null) {
 
-					final String message = String.format("could not create new property for '%s'", propertyIdentifier1);
+					final String message = String
+							.format("could not create new property for '%s'; could not deserialize response body", propertyIdentifier1);
 
 					LOG.error(message);
 
 					throw new WikidataImporterError(new WikidataImporterException(message));
 				}
 
-				final int status = response.getStatus();
+				final PropertyIdValue responsePropertyId = propertyDocument.getPropertyId();
 
-				LOG.debug("response status = {}", status);
+				if (responsePropertyId == null) {
 
-				final String responseBody = response.readEntity(String.class);
+					final String message = String
+							.format("could not create new property for '%s'; response property id is not available", propertyIdentifier1);
 
-				LOG.debug("response body = {}", responseBody);
+					LOG.error(message);
+
+					throw new WikidataImporterError(new WikidataImporterException(message));
+				}
+
+				return responsePropertyId;
 			} catch (final Exception e) {
 
 				final String message2 = "something went wrong, while trying to create a new property";
 
 				throw WikidataImporterError.wrap(new WikidataImporterException(message2, e));
 			}
-
-			// TODO: return property id from response, i.e., deserialize response body
-			return wikidataProperty.getPropertyId();
 		});
+	}
+
+	private JsonNode processEditEntityResponse(final String entityIdentifier, final Observable<Response> createEntityResponse, final String type) throws IOException {
+
+		final Response response = createEntityResponse.toBlocking().firstOrDefault(null);
+
+		if (response == null) {
+
+			final String message = String.format("could not create new %s for '%s'", type, entityIdentifier);
+
+			LOG.error(message);
+
+			throw new WikidataImporterError(new WikidataImporterException(message));
+		}
+
+		final int status = response.getStatus();
+
+		LOG.debug("response status = {}", status);
+
+		if (status != 200) {
+
+			final String message = String
+					.format("could not create new %s for '%s'; response status != 200 (was '%d').", type, entityIdentifier, status);
+
+			LOG.error(message);
+
+			throw new WikidataImporterError(new WikidataImporterException(message));
+		}
+
+		final String responseBody = response.readEntity(String.class);
+
+		LOG.debug("response body = {}", responseBody);
+
+		final ObjectNode responseJSON = MAPPER.readValue(responseBody, ObjectNode.class);
+
+		if (responseJSON == null) {
+
+			final String message = String
+					.format("could not create new %s for '%s'; could not deserialize response.", type, entityIdentifier);
+
+			LOG.error(message);
+
+			throw new WikidataImporterError(new WikidataImporterException(message));
+		}
+
+		final JsonNode successNode = responseJSON.get(MEDIAWIKI_SUCCESS_IDENTIFIER);
+
+		if (successNode == null) {
+
+			final String message = String
+					.format("could not create new %s for '%s'; no 'success' node in response", type, entityIdentifier);
+
+			LOG.error(message);
+
+			throw new WikidataImporterError(new WikidataImporterException(message));
+		}
+
+		final int success = successNode.asInt();
+
+		if (success != 1) {
+
+			final String message = String
+					.format("could not create new %s for '%s'; 'success' = '%d'", type, entityIdentifier, success);
+
+			LOG.error(message);
+
+			throw new WikidataImporterError(new WikidataImporterException(message));
+		}
+
+		final JsonNode entityNode = responseJSON.get(MEDIAWIKI_ENTITY_IDENTIFIER);
+
+		if (entityNode == null) {
+
+			final String message = String
+					.format("could not create new %s for '%s'; no 'entity' node in response", type, entityIdentifier);
+
+			LOG.error(message);
+
+			throw new WikidataImporterError(new WikidataImporterException(message));
+		}
+
+		return entityNode;
 	}
 
 	private Optional<Value> processGDMObject(final Node object) {
