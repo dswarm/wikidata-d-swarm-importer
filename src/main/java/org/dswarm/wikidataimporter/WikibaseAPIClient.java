@@ -154,6 +154,8 @@ public class WikibaseAPIClient {
 
 	private Map<String, Map<String, NewCookie>> generateEditToken() {
 
+		LOG.debug("try to generate edit token");
+
 		// 0. read user name + password from properties
 		final String username = getProperty(MEDIAWIKI_USERNAME);
 		final String password = getProperty(MEDIAWIKI_PASSWORD);
@@ -174,6 +176,8 @@ public class WikibaseAPIClient {
 				return Observable.empty();
 			}
 
+			LOG.debug("retrieved token with login credentials successfully");
+
 			// 2. confirm login request
 			return confirmLogin(token, loginRequestCookies).flatMap(confirmLoginResponse -> {
 
@@ -186,6 +190,8 @@ public class WikibaseAPIClient {
 
 					return Observable.empty();
 				}
+
+				LOG.debug("confirmed login with token and cookies successfully");
 
 				// 3. retrieve edit token request
 				return retrieveEditToken(confirmLoginCookies).map(retrieveEditTokenResponse -> {
@@ -203,11 +209,15 @@ public class WikibaseAPIClient {
 						return null;
 					}
 
+					LOG.debug("retrieved edit token with cookies successfully");
+
 					// 3.3 merge cookies from response from 2 + 3
 					loginRequestCookies.putAll(editTokenCookies);
 
 					final Map<String, Map<String, NewCookie>> result = new HashMap<>();
 					result.put(editToken, loginRequestCookies);
+
+					LOG.debug("generated edit token successfully");
 
 					return result;
 				});
@@ -216,6 +226,8 @@ public class WikibaseAPIClient {
 	}
 
 	public static Observable<Response> login(final String username, final String password) {
+
+		LOG.debug("try to retrieve token with login credentials");
 
 		final RxWebTarget<RxObservableInvoker> rxWebTarget = rxWebTarget();
 
@@ -234,6 +246,8 @@ public class WikibaseAPIClient {
 
 	public static Observable<Response> confirmLogin(final String token, final Map<String, NewCookie> cookies) {
 
+		LOG.debug("try to confirm login with token and cookies");
+
 		final RxObservableInvoker rx = buildBaseRequestWithCookies(cookies);
 
 		final FormDataMultiPart form = new FormDataMultiPart()
@@ -244,6 +258,8 @@ public class WikibaseAPIClient {
 	}
 
 	public static Observable<Response> retrieveEditToken(final Map<String, NewCookie> cookies) {
+
+		LOG.debug("try to retrieve edit token with cookies");
 
 		final RxObservableInvoker rx = buildBaseRequestWithCookies(cookies);
 
