@@ -229,9 +229,16 @@ public class WikidataDswarmImporter {
 	private Optional<org.wikidata.wdtk.datamodel.interfaces.Statement> processGDMStatement(final Statement statement) {
 
 		final Predicate gdmPredicate = statement.getPredicate();
-		final PropertyIdValue wikidataProperty = processGDMPredicate(gdmPredicate);
-
 		final Node gdmObject = statement.getObject();
+
+		final String propertyValueDataType;
+
+		final NodeType gdmObjectType = gdmObject.getType();
+
+		propertyValueDataType = determineWikidataPropertyValueDataType(gdmPredicate, gdmObjectType);
+
+		final PropertyIdValue wikidataProperty = processGDMPredicate(gdmPredicate, propertyValueDataType);
+
 		final Optional<Value> optionalWikidataValue = processGDMObject(gdmObject);
 
 		if (!optionalWikidataValue.isPresent()) {
@@ -267,14 +274,14 @@ public class WikidataDswarmImporter {
 		return Optional.ofNullable(Datamodel.makeStatement(claim, references, rank, ""));
 	}
 
-	private PropertyIdValue processGDMPredicate(final Predicate predicate) {
+	private PropertyIdValue processGDMPredicate(final Predicate predicate, final String propertyValueDataType) {
 
 		final String predicateURI = predicate.getUri();
 
-		return createOrGetWikidataProperty(predicateURI);
+		return createOrGetWikidataProperty(predicateURI, propertyValueDataType);
 	}
 
-	private PropertyIdValue createOrGetWikidataProperty(final String propertyIdentifier) {
+	private PropertyIdValue createOrGetWikidataProperty(final String propertyIdentifier, final String propertyValueDataType) {
 
 		return gdmPropertyURIWikidataPropertyMap.computeIfAbsent(propertyIdentifier, propertyIdentifier1 -> {
 
@@ -283,7 +290,7 @@ public class WikidataDswarmImporter {
 			final List<MonolingualTextValue> aliases = new ArrayList<>();
 
 			// add datatype - e.g. all literals are strings (DatatypeIdValue#DT_STRING) and all resources are items (DatatypeIdValue#DT_ITEM)
-			final DatatypeIdValue datatypeIdValue = Datamodel.makeDatatypeIdValue(DatatypeIdValue.DT_STRING);
+			final DatatypeIdValue datatypeIdValue = Datamodel.makeDatatypeIdValue(propertyValueDataType);
 
 			// note: list of descriptions cannot be null
 			// note: list of aliases cannot be null
@@ -514,7 +521,7 @@ public class WikidataDswarmImporter {
 			return Optional.empty();
 		}
 
-		final PropertyIdValue wikidataProperty = createOrGetWikidataProperty(qualifiedAttributeIdentifier);
+		final PropertyIdValue wikidataProperty = createOrGetWikidataProperty(qualifiedAttributeIdentifier, DatatypeIdValue.DT_STRING);
 
 		final Value value;
 
@@ -982,5 +989,31 @@ public class WikidataDswarmImporter {
 		}
 
 		return Optional.empty();
+	}
+
+	private static String determineWikidataPropertyValueDataType(final Predicate gdmPredicate, final NodeType gdmObjectType) {
+
+		final String propertyValueDataType;
+
+		switch(gdmObjectType) {
+
+			case Literal:
+
+				propertyValueDataType = DatatypeIdValue.DT_STRING;
+
+				break;
+			case Resource:
+
+				propertyValueDataType = DatatypeIdValue.DT_ITEM;
+
+				break;
+			default:
+
+				propertyValueDataType = DatatypeIdValue.DT_STRING;
+
+				LOG.debug("set property value data type '{}' for property '{}', because object type is '{}'", propertyValueDataType, gdmPredicate.getUri(), gdmObjectType);
+		}
+
+		return propertyValueDataType;
 	}
 }
