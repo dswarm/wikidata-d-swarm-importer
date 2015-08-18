@@ -78,6 +78,8 @@ public class WikidataDswarmImporter {
 
 	private static final Logger LOG = LoggerFactory.getLogger(WikidataDswarmImporter.class);
 
+	private static final String TOO_LONG_VALUE_POSTFIX = "...";
+
 	private static Pattern PROPERTY_PARAMETER_PATTERN = Pattern.compile("\\[\\[Property:(\\S+)\\|");
 	private static Pattern ITEM_PARAMETER_PATTERN     = Pattern.compile("\\[\\[Item:(\\S+)\\|");
 
@@ -100,8 +102,12 @@ public class WikidataDswarmImporter {
 	public static final  String WIKIBASE_VALIDATOR_LABEL_WITH_DESCRIPTION_CONFLICT_ERROR_MESSAGE_NAME = "wikibase-validator-label-with-description-conflict";
 	public static final  String MEDIAWIKI_PARAMETERS_IDENTIFIER                                       = "parameters";
 
-	private final AtomicLong    resourceCount     = new AtomicLong();
-	private final AtomicInteger propertyIdCounter = new AtomicInteger(100000);
+	private final AtomicLong    resourceCount           = new AtomicLong();
+	private final AtomicLong    bigResourceCount        = new AtomicLong();
+	private final AtomicLong    statementCount          = new AtomicLong();
+	private final AtomicLong    bigStatementCount       = new AtomicLong();
+	private final AtomicLong    processedStatementCount = new AtomicLong();
+	private final AtomicInteger propertyIdCounter       = new AtomicInteger(100000);
 
 	private static final Map<String, ItemIdValue>     gdmResourceURIWikidataItemMap     = new HashMap<>();
 	private static final Map<String, PropertyIdValue> gdmPropertyURIWikidataPropertyMap = new HashMap<>();
@@ -137,7 +143,7 @@ public class WikidataDswarmImporter {
 			}
 
 			return resource;
-		}).toBlocking().firstOrDefault(null);
+		}).toBlocking().lastOrDefault(null);
 
 		// TODO: return Observable (?)
 	}
@@ -162,6 +168,8 @@ public class WikidataDswarmImporter {
 
 			for (final Statement gdmStatement : gdmStatements) {
 
+				statementCount.incrementAndGet();
+
 				final String predicateURI = gdmStatement.getPredicate().getUri();
 
 				if (!wikidataStatementsMap.containsKey(predicateURI)) {
@@ -184,6 +192,17 @@ public class WikidataDswarmImporter {
 				final org.wikidata.wdtk.datamodel.interfaces.Statement wikidataStmt = optionalWikidataStmt.get();
 
 				wikidataStatementsMap.get(predicateURI).add(wikidataStmt);
+
+				processedStatementCount.incrementAndGet();
+
+				final long currentStatementCount = statementCount.get();
+
+				if (currentStatementCount / 10000 == bigStatementCount.get()) {
+
+					bigStatementCount.incrementAndGet();
+
+					LOG.info("processed '{}' from '{}' statements", processedStatementCount.get(), currentStatementCount);
+				}
 			}
 		}
 
@@ -211,6 +230,16 @@ public class WikidataDswarmImporter {
 
 		// add/update item id value at the resources items map
 		gdmResourceURIWikidataItemMap.putIfAbsent(resourceURI, itemIdValue);
+
+		final long currentResourceCount = resourceCount.get();
+
+		if (currentResourceCount / 10000 == bigResourceCount.get()) {
+
+			bigResourceCount.incrementAndGet();
+
+			LOG.info("processed '{}' resources ('{}' from '{}' statements)", currentResourceCount, processedStatementCount.get(),
+					statementCount.get());
+		}
 	}
 
 	/**
@@ -466,7 +495,11 @@ public class WikidataDswarmImporter {
 
 				if (!value.trim().isEmpty()) {
 
-					finalValue = value;
+					// note: we need to trim the values; otherwise, we'll get a 'wikibase-validator-malformed-value' error
+					final String trimmedValue = value.trim();
+
+					// note: we need to cut the values, if they are longer then 400 characters; otherwise, we'll get a 'wikibase-validator-too-long' error
+					finalValue = cutLongValue(trimmedValue);
 				} else {
 
 					// empty values are not possible in Wikidata - insert placeholder for now
@@ -995,7 +1028,7 @@ public class WikidataDswarmImporter {
 
 		final String propertyValueDataType;
 
-		switch(gdmObjectType) {
+		switch (gdmObjectType) {
 
 			case Literal:
 
@@ -1011,9 +1044,22 @@ public class WikidataDswarmImporter {
 
 				propertyValueDataType = DatatypeIdValue.DT_STRING;
 
-				LOG.debug("set property value data type '{}' for property '{}', because object type is '{}'", propertyValueDataType, gdmPredicate.getUri(), gdmObjectType);
+				LOG.debug("set property value data type '{}' for property '{}', because object type is '{}'", propertyValueDataType,
+						gdmPredicate.getUri(), gdmObjectType);
 		}
 
 		return propertyValueDataType;
+	}
+
+	private static String cutLongValue(final String value) {
+
+		if(value.length() <= 400) {
+
+			return value;
+		}
+
+		final String cuttedValue = value.substring(0, 396);
+
+		return cuttedValue + TOO_LONG_VALUE_POSTFIX;
 	}
 }
