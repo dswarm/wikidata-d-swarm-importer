@@ -1,3 +1,18 @@
+/**
+ * Copyright (C) 2013 – 2015 SLUB Dresden & Avantgarde Labs GmbH (<code@dswarm.org>)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *         http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package org.dswarm.wikidataimporter;
 
 import java.io.IOException;
@@ -18,6 +33,7 @@ import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.NewCookie;
 import javax.ws.rs.core.Response;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -33,7 +49,17 @@ import org.glassfish.jersey.media.multipart.FormDataMultiPart;
 import org.glassfish.jersey.media.multipart.MultiPartFeature;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.wikidata.wdtk.datamodel.helpers.DatamodelConverter;
+import org.wikidata.wdtk.datamodel.implementation.ItemDocumentImpl;
+import org.wikidata.wdtk.datamodel.implementation.PropertyDocumentImpl;
+import org.wikidata.wdtk.datamodel.interfaces.DataObjectFactory;
 import org.wikidata.wdtk.datamodel.interfaces.EntityDocument;
+import org.wikidata.wdtk.datamodel.interfaces.ItemDocument;
+import org.wikidata.wdtk.datamodel.interfaces.PropertyDocument;
+import org.wikidata.wdtk.datamodel.json.jackson.JacksonItemDocument;
+import org.wikidata.wdtk.datamodel.json.jackson.JacksonObjectFactory;
+import org.wikidata.wdtk.datamodel.json.jackson.JacksonPropertyDocument;
+import org.wikidata.wdtk.datamodel.json.jackson.JacksonTermedStatementDocument;
 import rx.Observable;
 import rx.schedulers.Schedulers;
 
@@ -106,18 +132,35 @@ public class WikibaseAPIClient {
 	private static final String MEDIAWIKI_API_JSON_FORMAT          = "json";
 	private static final String MEDIAWIKI_API_TOKENS_IDENTIFIER    = "tokens";
 	private static final String MEDIAWIKI_API_CSRFTOKEN_IDENTIFIER = "csrftoken";
-	private static final String WIKIBASE_API_ITEM_IDENTIFIER       = "item";
+
+	public static final String WIKIBASE_API_ENTITY_TYPE_ITEM     = "item";
+	public static final String WIKIBASE_API_ENTITY_TYPE_PROPERTY = "property";
 
 	private static final String WIKIBASE_API_EDIT_ENTITY = "wbeditentity";
 
-	private static final ObjectMapper MAPPER = new ObjectMapper();
+	private static final ObjectMapper MAPPER = new ObjectMapper()
+			.setSerializationInclusion(JsonInclude.Include.NON_EMPTY)
+			.setSerializationInclusion(JsonInclude.Include.NON_NULL);
+
+	private static final DataObjectFactory  jsonOjbectFactory  = new JacksonObjectFactory();
+	private static final DatamodelConverter datamodelConverter = new DatamodelConverter(jsonOjbectFactory);
 
 	private final String                 editToken;
 	private final Map<String, NewCookie> cookies;
 
-	public WikibaseAPIClient() {
+	public WikibaseAPIClient() throws WikidataImporterException {
 
 		final Map<String, Map<String, NewCookie>> result = generateEditToken();
+
+		if (result == null) {
+
+			final String message = "couldn't generate edit token successfully - API cannot be utilised for edit requests";
+
+			LOG.error(message);
+
+			throw new WikidataImporterException(message);
+		}
+
 		final Map.Entry<String, Map<String, NewCookie>> resultEntry = result.entrySet().iterator().next();
 
 		editToken = resultEntry.getKey();
@@ -125,6 +168,8 @@ public class WikibaseAPIClient {
 	}
 
 	private Map<String, Map<String, NewCookie>> generateEditToken() {
+
+		LOG.debug("try to generate edit token");
 
 		// 0. read user name + password from properties
 		final String username = getProperty(MEDIAWIKI_USERNAME);
@@ -139,7 +184,14 @@ public class WikibaseAPIClient {
 			// 1.2 get cookies from login request response
 			final Map<String, NewCookie> loginRequestCookies = getCookies(loginResponse);
 
-			// TODO null check
+			if (token == null || loginRequestCookies == null) {
+
+				LOG.error("couldn't retrieve token successfully - cannot continue edit token generation");
+
+				return Observable.empty();
+			}
+
+			LOG.debug("retrieved token with login credentials successfully");
 
 			// 2. confirm login request
 			return confirmLogin(token, loginRequestCookies).flatMap(confirmLoginResponse -> {
@@ -147,7 +199,14 @@ public class WikibaseAPIClient {
 				// 2.1 get cookies from login confirm response
 				final Map<String, NewCookie> confirmLoginCookies = getCookies(confirmLoginResponse);
 
-				// TODO null check
+				if (confirmLoginCookies == null) {
+
+					LOG.error("couldn't confirm login token successfully - cannot continue edit token generation");
+
+					return Observable.empty();
+				}
+
+				LOG.debug("confirmed login with token and cookies successfully");
 
 				// 3. retrieve edit token request
 				return retrieveEditToken(confirmLoginCookies).map(retrieveEditTokenResponse -> {
@@ -158,13 +217,22 @@ public class WikibaseAPIClient {
 					// 3.2 get cookies from edit token response
 					final Map<String, NewCookie> editTokenCookies = getCookies(retrieveEditTokenResponse);
 
+					if (editTokenCookies == null) {
+
+						LOG.error("couldn't retrieve edit token successfully - cannot continue edit token generation");
+
+						return null;
+					}
+
+					LOG.debug("retrieved edit token with cookies successfully");
+
 					// 3.3 merge cookies from response from 2 + 3
 					loginRequestCookies.putAll(editTokenCookies);
 
-					// TODO null check
-
 					final Map<String, Map<String, NewCookie>> result = new HashMap<>();
 					result.put(editToken, loginRequestCookies);
+
+					LOG.debug("generated edit token successfully");
 
 					return result;
 				});
@@ -173,6 +241,8 @@ public class WikibaseAPIClient {
 	}
 
 	public static Observable<Response> login(final String username, final String password) {
+
+		LOG.debug("try to retrieve token with login credentials");
 
 		final RxWebTarget<RxObservableInvoker> rxWebTarget = rxWebTarget();
 
@@ -191,6 +261,8 @@ public class WikibaseAPIClient {
 
 	public static Observable<Response> confirmLogin(final String token, final Map<String, NewCookie> cookies) {
 
+		LOG.debug("try to confirm login with token and cookies");
+
 		final RxObservableInvoker rx = buildBaseRequestWithCookies(cookies);
 
 		final FormDataMultiPart form = new FormDataMultiPart()
@@ -202,12 +274,15 @@ public class WikibaseAPIClient {
 
 	public static Observable<Response> retrieveEditToken(final Map<String, NewCookie> cookies) {
 
+		LOG.debug("try to retrieve edit token with cookies");
+
 		final RxObservableInvoker rx = buildBaseRequestWithCookies(cookies);
 
 		final FormDataMultiPart form = new FormDataMultiPart()
 				.field(MEDIAWIKI_API_ACTION_IDENTIFIER, MEDIAWIKI_API_QUERY)
 				.field(MEDIAWIKI_API_META_IDENTIFIER, MEDIAWIKI_API_TOKENS_IDENTIFIER)
-				.field(MEDIAWIKI_API_CONTINUE_IDENTIFIER, "");
+				.field(MEDIAWIKI_API_CONTINUE_IDENTIFIER, "")
+				.field(MEDIAWIKI_API_FORMAT_IDENTIFIER, MEDIAWIKI_API_JSON_FORMAT);
 
 		return excutePOST(rx, form);
 	}
@@ -218,26 +293,44 @@ public class WikibaseAPIClient {
 
 			final String responseBody = loginResponse.readEntity(String.class);
 
-			// TODO null check
+			if (responseBody == null) {
+
+				LOG.error("cannot extract token - response body is not available");
+
+				return null;
+			}
 
 			final ObjectNode json = MAPPER.readValue(responseBody, ObjectNode.class);
 
-			// TODO null check
+			if (json == null) {
+
+				LOG.error("cannot extract token - response JSON is not available");
+
+				return null;
+			}
 
 			final JsonNode loginNode = json.get(MEDIAWIKI_API_LOGIN);
 
-			// TODO null check
+			if (loginNode == null) {
+
+				LOG.error("cannot extract token - '{}' node is not available in response JSON '{}'", MEDIAWIKI_API_LOGIN, responseBody);
+
+				return null;
+			}
 
 			final JsonNode tokenNode = loginNode.get(MEDIAWIKI_API_TOKEN_IDENTIFIER);
 
-			// TODO null check
+			if (tokenNode == null) {
+
+				LOG.error("cannot extract token - '{}' node is not available in response JSON '{}'", MEDIAWIKI_API_TOKEN_IDENTIFIER, responseBody);
+
+				return null;
+			}
 
 			return tokenNode.asText();
 		} catch (final Exception e) {
 
-			e.printStackTrace();
-
-			// TODO wrap/delegate error
+			LOG.error("cannot extract token - an error occurred while trying to extract the token from the response body", e);
 
 			return null;
 		}
@@ -249,47 +342,99 @@ public class WikibaseAPIClient {
 
 			final String responseBody = editTokenResponse.readEntity(String.class);
 
-			// TODO null check
+			if (responseBody == null) {
+
+				LOG.error("cannot extract edit token - response body is not available");
+
+				return null;
+			}
 
 			final ObjectNode json = MAPPER.readValue(responseBody, ObjectNode.class);
 
-			// TODO null check
+			if (json == null) {
+
+				LOG.error("cannot extract edit token - response JSON is not available");
+
+				return null;
+			}
 
 			final JsonNode queryNode = json.get(MEDIAWIKI_API_QUERY);
 
-			// TODO null check
+			if (queryNode == null) {
+
+				LOG.error("cannot extract edit token - '{}' node is not available in response JSON '{}'", MEDIAWIKI_API_QUERY, responseBody);
+
+				return null;
+			}
 
 			final JsonNode tokensNode = queryNode.get(MEDIAWIKI_API_TOKENS_IDENTIFIER);
 
-			// TODO null check
+			if (tokensNode == null) {
+
+				LOG.error("cannot extract edit token - '{}' node is not available in response JSON '{}'", MEDIAWIKI_API_TOKENS_IDENTIFIER,
+						responseBody);
+
+				return null;
+			}
 
 			final JsonNode csrfTokenNode = tokensNode.get(MEDIAWIKI_API_CSRFTOKEN_IDENTIFIER);
 
-			// TODO null check
+			if (csrfTokenNode == null) {
+
+				LOG.error("cannot extract edit token - '{}' node is not available in response JSON '{}'", MEDIAWIKI_API_CSRFTOKEN_IDENTIFIER,
+						responseBody);
+
+				return null;
+			}
 
 			return csrfTokenNode.asText();
 		} catch (final Exception e) {
 
-			e.printStackTrace();
-
-			// TODO wrap/delegate error
+			LOG.error("cannot extract edit token - an error occurred while trying to extract the edit token from the response body", e);
 
 			return null;
 		}
 	}
 
-	public Observable<Response> createEntity(final EntityDocument entity)
-			throws JsonProcessingException {
+	public Observable<Response> createEntity(final EntityDocument entity, final String entityType)
+			throws JsonProcessingException, WikidataImporterException {
 
-		final String entityJSONString = MAPPER.writeValueAsString(entity);
+		final EntityDocument jacksonEntity;
+
+		switch (entityType) {
+
+			case WIKIBASE_API_ENTITY_TYPE_ITEM:
+
+				//jacksonEntity = JacksonItemDocument.fromItemDocumentImpl((ItemDocumentImpl) entity);
+				jacksonEntity = datamodelConverter.copy((ItemDocument) entity);
+
+				break;
+			case WIKIBASE_API_ENTITY_TYPE_PROPERTY:
+
+				jacksonEntity = JacksonPropertyDocument.fromPropertyDocumentImpl((PropertyDocumentImpl) entity);
+
+				break;
+			default:
+
+				final String message = String.format("unknown entity type '%s'", entityType);
+
+				LOG.error(message);
+
+				throw new WikidataImporterException(message);
+		}
+
+		final String entityJSONString = MAPPER.writeValueAsString(jacksonEntity);
+
+		LOG.debug("create new '{}' with '{}'", entityType, entityJSONString);
 
 		final RxObservableInvoker rx = buildBaseRequestWithCookies(cookies);
 
 		final FormDataMultiPart form = new FormDataMultiPart()
 				.field(MEDIAWIKI_API_ACTION_IDENTIFIER, WIKIBASE_API_EDIT_ENTITY)
-				.field(WIKIBASE_API_NEW_IDENTIFIER, WIKIBASE_API_ITEM_IDENTIFIER)
+				.field(WIKIBASE_API_NEW_IDENTIFIER, entityType)
 				.field(WIKIBASE_API_DATA_IDENTIFIER, entityJSONString)
-				.field(MEDIAWIKI_API_TOKEN_IDENTIFIER, editToken);
+				.field(MEDIAWIKI_API_TOKEN_IDENTIFIER, editToken)
+				.field(MEDIAWIKI_API_FORMAT_IDENTIFIER, MEDIAWIKI_API_JSON_FORMAT);
 		//form.bodyPart(entityJSONString, MediaType.APPLICATION_JSON_TYPE);
 
 		return excutePOST(rx, form);
