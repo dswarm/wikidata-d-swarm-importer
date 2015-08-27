@@ -195,11 +195,11 @@ public class WikidataDswarmImporter {
 
 				processedStatementCount.incrementAndGet();
 
-				final long currentStatementCount = statementCount.get();
+				final boolean updated = checkAndOptionallyUpdateBigCounter(statementCount, bigStatementCount);
 
-				if (currentStatementCount / 10000 == bigStatementCount.get()) {
+				if (updated) {
 
-					bigStatementCount.incrementAndGet();
+					final long currentStatementCount = statementCount.get();
 
 					LOG.info("processed '{}' from '{}' statements", processedStatementCount.get(), currentStatementCount);
 				}
@@ -231,11 +231,11 @@ public class WikidataDswarmImporter {
 		// add/update item id value at the resources items map
 		gdmResourceURIWikidataItemMap.putIfAbsent(resourceURI, itemIdValue);
 
-		final long currentResourceCount = resourceCount.get();
+		final boolean updated = checkAndOptionallyUpdateBigCounter(resourceCount, bigResourceCount);
 
-		if (currentResourceCount / 10000 == bigResourceCount.get()) {
+		if (updated) {
 
-			bigResourceCount.incrementAndGet();
+			final long currentResourceCount = resourceCount.get();
 
 			LOG.info("processed '{}' resources ('{}' from '{}' statements)", currentResourceCount, processedStatementCount.get(),
 					statementCount.get());
@@ -504,7 +504,9 @@ public class WikidataDswarmImporter {
 
 					// empty values are not possible in Wikidata - insert placeholder for now
 
-					finalValue = VALUE_WAS_EMPTY_ORIGINALLY;
+					//finalValue = VALUE_WAS_EMPTY_ORIGINALLY;
+
+					return Optional.empty();
 				}
 
 				return Optional.ofNullable(Datamodel.makeStringValue(finalValue));
@@ -1053,7 +1055,7 @@ public class WikidataDswarmImporter {
 
 	private static String cutLongValue(final String value) {
 
-		if(value.length() <= 400) {
+		if (value.length() <= 400) {
 
 			return value;
 		}
@@ -1061,5 +1063,28 @@ public class WikidataDswarmImporter {
 		final String cuttedValue = value.substring(0, 396);
 
 		return cuttedValue + TOO_LONG_VALUE_POSTFIX;
+	}
+
+	private boolean checkAndOptionallyUpdateBigCounter(final AtomicLong count, final AtomicLong bigCount) {
+
+		boolean needsUpdate = true;
+		boolean updated = false;
+
+		do {
+
+			final long currentCount = count.get();
+			final long currentBigCount = bigCount.get();
+
+			needsUpdate = currentCount / 10000 == currentBigCount;
+
+			if (needsUpdate) {
+
+				needsUpdate = !bigStatementCount.compareAndSet(currentBigCount, currentBigCount + 1);
+
+				updated = !needsUpdate;
+			}
+		} while (needsUpdate);
+
+		return updated;
 	}
 }
