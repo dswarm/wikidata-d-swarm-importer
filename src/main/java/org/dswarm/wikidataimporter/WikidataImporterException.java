@@ -13,30 +13,37 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.dswarm.wikidataimporter.test;
-
-import java.net.URL;
-
-import com.google.common.io.Resources;
-import org.junit.Test;
-
-import org.dswarm.wikidataimporter.Executer;
+package org.dswarm.wikidataimporter;
 
 /**
  * @author tgaengler
  */
-public class WikidataDswarmImporterTest {
+public class WikidataImporterException extends Exception {
 
-	@Test
-	public void wikidataDswarmImporterTest() {
+	/**
+	 *
+	 */
+	private static final long serialVersionUID = 1L;
 
-		final URL resourceURL = Resources.getResource("lic_dmp_01_v1.csv.gson");
+	/**
+	 * Creates a new Wikidata import exception with the given exception message.
+	 *
+	 * @param exception the exception message
+	 */
+	public WikidataImporterException(final String exception) {
 
-		final String[] args = new String[] {
-				resourceURL.getPath()
-		};
-
-		Executer.main(args);
+		super(exception);
 	}
 
+	/**
+	 * Creates a new TPU exception with the given exception message
+	 * and a cause.
+	 *
+	 * @param message the exception message
+	 * @param cause   a previously thrown exception, causing this one
+	 */
+	public WikidataImporterException(final String message, final Throwable cause) {
+
+		super(message, cause);
+	}
 }
